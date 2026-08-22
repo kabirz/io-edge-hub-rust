@@ -23,9 +23,22 @@ fn main() {
         _ => "000000".to_string(),
     };
     let fw_version = format!("v{ver}_{git}");
+    // single-digit components for the Modbus version register (maj<<12|min<<8|patch)
+    let parts: Vec<u32> = ver.split('.').map(|p| p.parse::<u32>().unwrap_or(0)).collect();
+    let (maj, min, pat) = (
+        *parts.first().unwrap_or(&0),
+        *parts.get(1).unwrap_or(&0),
+        *parts.get(2).unwrap_or(&0),
+    );
     std::fs::write(
         out.join("fw_version.rs"),
-        format!("pub const FW_VERSION: &str = \"{fw_version}\";\n"),
+        format!(
+            "pub const FW_VERSION: &str = \"{fw_version}\";\n\
+             pub const FW_MAJOR: u8 = {maj};\n\
+             pub const FW_MINOR: u8 = {min};\n\
+             pub const FW_PATCH: u8 = {pat};\n\
+             pub const FW_GIT: &[u8; 6] = b\"{git}\";\n"
+        ),
     )
     .unwrap();
     println!("cargo:rerun-if-changed={}", root.join("VERSION").display());
