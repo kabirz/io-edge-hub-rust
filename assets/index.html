@@ -1,0 +1,878 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>数据采集卡</title>
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Cdefs%3E%3ClinearGradient id='g' x1='0' y1='0' x2='1' y2='1'%3E%3Cstop offset='0' stop-color='%233b82f6'/%3E%3Cstop offset='1' stop-color='%2360a5fa'/%3E%3C/linearGradient%3E%3C/defs%3E%3Crect width='64' height='64' rx='14' fill='url(%23g)'/%3E%3Ctext x='32' y='42' font-family='Arial,sans-serif' font-size='26' font-weight='700' fill='%23fff' text-anchor='middle'%3EIO%3C/text%3E%3C/svg%3E">
+<style>
+:root{
+	--bg:#f5f6f8;--card:#ffffff;--txt:#1f2430;--sub:#7a8194;--line:#e7e9ee;
+	--acc:#3b82f6;--on:#10b981;--off:#cbd2dd;--warn:#f59e0b;--err:#ef4444;
+	--rad:12px;
+}
+*{box-sizing:border-box;margin:0;padding:0}
+html,body{height:100%}
+body{background:var(--bg);color:var(--txt);font:14px/1.6 -apple-system,"Segoe UI","PingFang SC","Microsoft YaHei",sans-serif}
+a{color:var(--acc);text-decoration:none}
+
+/* ---------- 整体框架: 左侧栏 + 右内容 ---------- */
+.layout{display:flex;min-height:100vh}
+
+/* ---------- 侧边栏 ---------- */
+aside{width:224px;flex:none;background:var(--card);border-right:1px solid var(--line);
+	display:flex;flex-direction:column;padding:18px 14px;position:sticky;top:0;height:100vh}
+.brand{display:flex;align-items:center;gap:12px;padding:4px 8px 18px;border-bottom:1px solid var(--line);margin-bottom:14px}
+.brand .logo{width:40px;height:40px;border-radius:11px;background:linear-gradient(135deg,#3b82f6,#60a5fa);
+	display:flex;align-items:center;justify-content:center;color:#fff;font-weight:700;font-size:15px;letter-spacing:.5px;
+	box-shadow:0 2px 6px rgba(59,130,246,.35)}
+.brand h1{font-size:15.5px;font-weight:650;line-height:1.3}
+.brand .hsub{color:var(--sub);font-size:11px}
+nav{display:flex;flex-direction:column;gap:4px}
+nav button{display:flex;align-items:center;gap:11px;border:0;background:none;text-align:left;
+	padding:10px 14px;border-radius:10px;font:inherit;font-size:14px;color:var(--sub);cursor:pointer;
+	transition:.15s;position:relative}
+nav button svg{width:18px;height:18px;flex:none;opacity:.85}
+nav button:hover{background:#f0f3f8;color:var(--txt)}
+nav button.on{background:var(--acc);color:#fff;font-weight:550;box-shadow:0 2px 8px rgba(59,130,246,.3)}
+nav button.on:hover{background:var(--acc)}
+.side-foot{margin-top:auto;padding:12px 8px 2px;border-top:1px solid var(--line);display:flex;flex-direction:column;gap:8px}
+.chip{display:inline-flex;align-items:center;gap:6px;background:#fafbfc;border:1px solid var(--line);
+	border-radius:99px;padding:3px 12px;font-size:12px;color:var(--sub);width:fit-content}
+.dot{width:8px;height:8px;border-radius:50%;background:var(--err);flex:none}
+.dot.ok{background:var(--on)}
+
+/* ---------- 主内容区 ---------- */
+main{flex:1;min-width:0;padding:26px 30px 48px;max-width:1060px;margin:0 auto}
+
+/* ---------- 顶栏 (内容区内的状态条) ---------- */
+.topbar{display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin-bottom:20px}
+.topbar .spacer{flex:1}
+
+/* ---------- 卡片 ---------- */
+.card{background:var(--card);border:1px solid var(--line);border-radius:var(--rad);padding:18px 20px;margin-bottom:16px;
+	box-shadow:0 1px 2px rgba(20,30,50,.04)}
+.card h2{font-size:15px;font-weight:650;margin-bottom:4px;display:flex;align-items:center;gap:8px}
+.card .tip{font-size:12px;color:var(--sub);margin-bottom:14px}
+.grid{display:grid;gap:14px}
+.g2{grid-template-columns:repeat(auto-fit,minmax(340px,1fr))}
+.g4{grid-template-columns:repeat(auto-fit,minmax(200px,1fr))}
+
+/* ---------- 概览 ---------- */
+.kv{display:grid;grid-template-columns:130px 1fr;gap:6px 12px;font-size:13px}
+.kv div:nth-child(odd){color:var(--sub)}
+
+/* ---------- IO ---------- */
+.sec-label{font-size:12px;color:var(--sub);font-weight:600;letter-spacing:1px;margin:6px 0 10px}
+.di-grid{display:grid;grid-template-columns:repeat(8,1fr);gap:8px}
+@media(max-width:720px){.di-grid{grid-template-columns:repeat(4,1fr)}}
+.io-chip{border:1px solid var(--line);border-radius:9px;padding:8px 4px;text-align:center;background:#fafbfc;transition:.15s}
+.io-chip .nm{font-size:11px;color:var(--sub)}
+.io-chip .st{font-size:12px;font-weight:700;color:var(--off);margin-top:2px}
+.io-chip.on{border-color:#a7f3d0;background:#ecfdf5}
+.io-chip.on .st{color:var(--on)}
+.io-chip.dis{opacity:.4}
+
+.do-grid{display:grid;grid-template-columns:repeat(4,1fr);gap:10px}
+@media(max-width:720px){.do-grid{grid-template-columns:repeat(2,1fr)}}
+.do-item{display:flex;align-items:center;justify-content:space-between;border:1px solid var(--line);
+	border-radius:9px;padding:10px 14px;background:#fafbfc}
+.do-item .nm{font-size:13px;font-weight:600}
+.sw{position:relative;width:42px;height:24px;flex:none;cursor:pointer}
+.sw input{opacity:0;width:0;height:0}
+.sw i{position:absolute;inset:0;background:var(--off);border-radius:99px;transition:.2s}
+.sw i:before{content:"";position:absolute;width:18px;height:18px;border-radius:50%;background:#fff;top:3px;left:3px;transition:.2s;
+	box-shadow:0 1px 2px rgba(0,0,0,.25)}
+.sw input:checked+i{background:var(--on)}
+.sw input:checked+i:before{left:21px}
+
+.ai-card{border:1px solid var(--line);border-radius:9px;padding:12px 14px;background:#fafbfc}
+.ai-card .nm{font-size:12px;color:var(--sub);display:flex;justify-content:space-between}
+.ai-card .val{font-size:22px;font-weight:700;font-variant-numeric:tabular-nums;margin:2px 0 8px}
+.ai-card .val small{font-size:12px;font-weight:500;color:var(--sub);margin-left:3px}
+.bar{height:6px;border-radius:99px;background:#edf0f4;overflow:hidden}
+.bar i{display:block;height:100%;border-radius:99px;background:linear-gradient(90deg,#60a5fa,#3b82f6);width:0%;transition:.3s}
+.bar i.over{background:linear-gradient(90deg,#fbbf24,#f59e0b)}
+
+/* ---------- 表格 ---------- */
+table{width:100%;border-collapse:collapse;font-size:13px}
+th{color:var(--sub);font-weight:600;text-align:left;padding:7px 8px;border-bottom:1px solid var(--line);font-size:12px}
+td{padding:7px 8px;border-bottom:1px solid #f0f2f5;font-variant-numeric:tabular-nums}
+tr:last-child td{border-bottom:0}
+td input[type=number]{width:110px;border:1px solid var(--line);border-radius:7px;padding:4px 8px;font:inherit;background:#fff}
+td input:focus{outline:2px solid #bfdbfe;border-color:var(--acc)}
+.mono{font-family:ui-monospace,Consolas,monospace;font-size:12px}
+.ro{color:var(--sub)}
+
+/* ---------- 寄存器页: 左右两栏一屏显示, 紧凑行高 ---------- */
+.reg-cols{display:grid;grid-template-columns:1fr 1fr;gap:14px;align-items:start}
+.rg-card{padding:14px 16px;margin-bottom:0}
+.rg-card h2{font-size:14px;margin-bottom:2px}
+.rg-card .tip{font-size:11px;margin-bottom:8px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+table.compact{font-size:12px}
+table.compact th{padding:4px 6px}
+table.compact td{padding:3px 6px}
+table.compact td input[type=number]{width:86px;padding:2px 6px;font-size:12px}
+@media(max-width:980px){.reg-cols{grid-template-columns:1fr}}
+.badge{display:inline-block;font-size:11px;border-radius:5px;padding:1px 7px;background:#eef2ff;color:#6366f1}
+.badge.g{background:#ecfdf5;color:#059669}
+.badge.y{background:#fffbeb;color:#d97706}
+
+/* ---------- 按钮 ---------- */
+.btn{display:inline-flex;align-items:center;gap:6px;border:1px solid var(--line);background:var(--card);color:var(--txt);
+	border-radius:8px;padding:6px 16px;font:inherit;font-size:13px;cursor:pointer;transition:.15s}
+.btn:hover{border-color:#c9d2e0;background:#f8fafc}
+.btn.pri{background:var(--acc);border-color:var(--acc);color:#fff}
+.btn.pri:hover{background:#2563eb}
+.btn.danger{color:var(--err);border-color:#fecaca}
+.btn.danger:hover{background:#fef2f2}
+.btn:disabled{opacity:.5;cursor:not-allowed}
+.btn.sm{padding:3px 10px;font-size:12px}
+.row{display:flex;gap:10px;align-items:center;flex-wrap:wrap}
+
+/* ---------- 历史 ---------- */
+.empty{color:var(--sub);font-size:13px;text-align:center;padding:22px 0}
+
+/* ---------- 系统配置 ---------- */
+.cfg-form{display:grid;grid-template-columns:130px 1fr;gap:10px 12px;align-items:center;font-size:13px}
+.cfg-form label{color:var(--sub)}
+.cfg-form input,.cfg-form select{border:1px solid var(--line);border-radius:8px;padding:6px 10px;
+	font:inherit;background:#fff;width:100%;max-width:220px}
+.cfg-form input:focus,.cfg-form select:focus{outline:2px solid #bfdbfe;border-color:var(--acc)}
+.ip-row{display:flex;align-items:center;gap:4px;max-width:280px}
+.ip-row input{min-width:0;flex:1;padding:6px 4px;text-align:center}
+.ip-row i{color:var(--sub);font-style:normal}
+
+/* ---------- 升级 ---------- */
+.up-drop{border:2px dashed var(--line);border-radius:var(--rad);padding:30px;text-align:center;color:var(--sub);
+	cursor:pointer;transition:.15s;font-size:13px}
+.up-drop:hover,.up-drop.hover{border-color:var(--acc);background:#f0f6ff}
+.prog{height:10px;border-radius:99px;background:#edf0f4;overflow:hidden;margin:14px 0 6px;display:none}
+.prog i{display:block;height:100%;background:var(--acc);width:0%;transition:.2s}
+.msg{font-size:13px;min-height:20px}
+.msg.ok{color:var(--on)} .msg.err{color:var(--err)} .msg.warn{color:var(--warn)}
+
+footer{text-align:center;color:#b6bcc9;font-size:12px;padding-top:8px}
+.hide{display:none!important}
+
+/* ---------- Toast 通知 ---------- */
+#toastBox{position:fixed;bottom:24px;right:24px;z-index:9999;display:flex;flex-direction:column;gap:8px;pointer-events:none}
+.toast{padding:10px 18px;border-radius:8px;font-size:13px;color:#fff;pointer-events:auto;
+	animation:toastIn .25s ease,toastOut .3s ease 2.7s forwards;
+	box-shadow:0 4px 12px rgba(0,0,0,.15);max-width:320px;word-break:break-all}
+.toast.ok{background:#10b981} .toast.err{background:#ef4444} .toast.info{background:#3b82f6}
+@keyframes toastIn{from{opacity:0;transform:translateY(12px)}to{opacity:1;transform:translateY(0)}}
+@keyframes toastOut{to{opacity:0;transform:translateY(-8px)}}
+
+/* ---------- 确认弹窗 ---------- */
+.modal-mask{position:fixed;inset:0;background:rgba(0,0,0,.35);z-index:9998;display:flex;
+	align-items:center;justify-content:center;animation:fadeIn .15s ease}
+.modal-box{background:var(--card);border-radius:var(--rad);padding:24px 28px;min-width:300px;max-width:400px;
+	box-shadow:0 8px 30px rgba(0,0,0,.18);animation:modalIn .2s ease}
+.modal-box p{margin:0 0 20px;font-size:14px;line-height:1.6}
+.modal-btns{display:flex;justify-content:flex-end;gap:10px}
+@keyframes fadeIn{from{opacity:0}to{opacity:1}}
+@keyframes modalIn{from{opacity:0;transform:scale(.92)}to{opacity:1;transform:scale(1)}}
+
+/* ---------- 移动端: 侧栏折叠为顶部横条 ---------- */
+@media(max-width:820px){
+	.layout{flex-direction:column}
+	aside{width:100%;height:auto;position:static;border-right:0;border-bottom:1px solid var(--line);padding:12px 14px}
+	.brand{padding-bottom:12px;margin-bottom:10px}
+	nav{flex-direction:row;overflow-x:auto;gap:6px;padding-bottom:2px}
+	nav button{padding:8px 13px;white-space:nowrap;font-size:13px}
+	nav button svg{width:16px;height:16px}
+	.side-foot{display:none}
+	main{padding:16px 14px 40px}
+	.m-only{display:none!important}
+}
+</style>
+</head>
+<body>
+<div id="toastBox"></div>
+<div class="layout">
+
+<aside>
+	<div class="brand">
+		<div class="logo">IO</div>
+		<div>
+			<h1>数据采集卡</h1>
+			<div class="hsub">工业 IO 边缘网关</div>
+		</div>
+	</div>
+
+	<nav id="tabs">
+		<button class="on" data-t="ov">
+			<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="7" height="9" rx="1.5"/><rect x="14" y="3" width="7" height="5" rx="1.5"/><rect x="14" y="12" width="7" height="9" rx="1.5"/><rect x="3" y="16" width="7" height="5" rx="1.5"/></svg>
+			概览</button>
+		<button data-t="io">
+			<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M2 12h3l3-8 4 16 3-8h7"/></svg>
+			IO 监控</button>
+		<button data-t="rg">
+			<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="4" y="3" width="16" height="18" rx="2"/><line x1="8" y1="8" x2="16" y2="8"/><line x1="8" y1="12" x2="16" y2="12"/><line x1="8" y1="16" x2="12" y2="16"/></svg>
+			寄存器</button>
+		<button data-t="hi">
+			<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 3"/></svg>
+			历史记录</button>
+		<button data-t="cf">
+			<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 1 1-4 0v-.09a1.65 1.65 0 0 0-1-1.51 1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 1 1 0-4h.09a1.65 1.65 0 0 0 1.51-1 1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33h0a1.65 1.65 0 0 0 1-1.51V3a2 2 0 1 1 4 0v.09a1.65 1.65 0 0 0 1 1.51h0a1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82v0a1.65 1.65 0 0 0 1.51 1H21a2 2 0 1 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>
+			系统配置</button>
+		<button data-t="fw">
+			<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3v12"/><path d="M7 10l5 5 5-5"/><path d="M4 21h16"/></svg>
+			固件升级</button>
+	</nav>
+
+	<div class="side-foot">
+		<div class="chip"><span class="dot" id="wsDot"></span><span id="wsTxt">连接中</span></div>
+		<div class="chip" id="hVer">--</div>
+		<div class="chip m-only" id="hClock">--:--:--</div>
+	</div>
+</aside>
+
+<main>
+<div class="topbar">
+	<span class="hsub" id="hSub">板卡与固件基础信息</span>
+	<div class="spacer"></div>
+</div>
+
+<!-- ================= 概览 ================= -->
+<section id="t-ov">
+	<div class="grid g2">
+		<div class="card">
+			<h2>设备信息</h2>
+			<div class="tip">板卡与固件基础信息</div>
+			<div class="kv" id="infoKv"></div>
+		</div>
+		<div class="card">
+			<h2>运行状态</h2>
+			<div class="tip">实时采集与网络状态</div>
+			<div class="kv" id="statKv"></div>
+		</div>
+	</div>
+	<div class="card">
+		<h2>快捷操作</h2>
+		<div class="tip">参数修改后需点击「保存参数」持久化；改 IP / Modbus 参数需重启生效</div>
+		<div class="row">
+			<button class="btn" onclick="syncTime()">同步本机时间</button>
+			<button class="btn" onclick="saveCfg()">保存参数</button>
+			<button class="btn danger" onclick="rebootDev()">重启设备</button>
+		</div>
+	</div>
+</section>
+
+<!-- ================= IO 监控 ================= -->
+<section id="t-io" class="hide">
+	<div class="card">
+		<h2>数字输入 DI <span class="badge">16 路</span></h2>
+		<div class="tip">实时状态经 WebSocket 推送，未使能通道置灰</div>
+		<div class="di-grid" id="diGrid"></div>
+	</div>
+	<div class="card">
+		<h2>数字输出 DO <span class="badge">8 路</span></h2>
+		<div class="tip">点击开关切换输出（与 Modbus FC05 同路径，含 LED 联动）</div>
+		<div class="do-grid" id="doGrid"></div>
+	</div>
+	<div class="card">
+		<h2>模拟输入 AI <span class="badge">4 路</span></h2>
+		<div class="tip">AI1 / AI2：4-20mA 电流 · AI3 / AI4：0-10V 电压</div>
+		<div class="grid g4" id="aiGrid"></div>
+	</div>
+</section>
+
+<!-- ================= 寄存器 ================= -->
+<section id="t-rg" class="hide">
+	<div class="reg-cols">
+	<div class="card rg-card">
+		<h2>保持寄存器 Holding <span class="badge">FC03 / FC06 / FC16</span></h2>
+		<div class="tip">写操作与 Modbus 写回调共用同一入口（含副作用）；40016 保存 / 40018 重启由按钮代替</div>
+		<div style="overflow-x:auto"><table id="hrTbl" class="compact"></table></div>
+	</div>
+	<div class="card rg-card">
+		<h2>输入寄存器 Input <span class="badge g">只读</span></h2>
+		<div class="tip">固件版本与实时采样数据</div>
+		<div style="overflow-x:auto"><table id="irTbl" class="compact"></table></div>
+	</div>
+	</div>
+</section>
+
+<!-- ================= 历史记录 ================= -->
+<section id="t-hi" class="hide">
+	<div class="card">
+		<h2>历史数据文件</h2>
+		<div class="tip">LittleFS /lfs1 下的采集记录（DI 10B / AI 16B 二进制，单文件上限 1MB，最多保留 10 个）</div>
+		<div class="row" style="margin-bottom:12px">
+			<button class="btn sm" onclick="loadHist()">刷新</button>
+			<span class="hsub" id="histStat"></span>
+		</div>
+		<div style="overflow-x:auto"><table id="histTbl"></table></div>
+		<div class="empty hide" id="histEmpty">暂无历史文件</div>
+	</div>
+</section>
+
+<!-- ================= 系统配置 ================= -->
+<section id="t-cf" class="hide">
+	<div class="grid g2">
+		<div class="card">
+			<h2>网络 / Modbus</h2>
+			<div class="tip">修改后需「保存参数」并重启设备生效</div>
+			<div class="cfg-form">
+				<label>IP 地址</label>
+				<div class="ip-row">
+					<input type="number" id="cfIp1" min="1" max="254"><i>.</i>
+					<input type="number" id="cfIp2" min="0" max="255"><i>.</i>
+					<input type="number" id="cfIp3" min="0" max="255"><i>.</i>
+					<input type="number" id="cfIp4" min="1" max="254">
+				</div>
+				<label>RS485 波特率</label>
+				<select id="cfRs">
+					<option>4800</option><option>9600</option><option>19200</option>
+					<option>38400</option><option>57600</option><option>115200</option>
+				</select>
+				<label>Modbus Slave ID</label>
+				<input type="number" id="cfSid" min="1" max="247">
+			</div>
+		</div>
+		<div class="card">
+			<h2>CAN 总线</h2>
+			<div class="tip">修改后需「保存参数」并重启设备生效</div>
+			<div class="cfg-form">
+				<label>CAN 波特率 (kbps)</label>
+				<select id="cfCanB">
+					<option>50</option><option>100</option><option>125</option>
+					<option>250</option><option>500</option><option>800</option><option>1000</option>
+				</select>
+				<label>CAN ID</label>
+				<input type="number" id="cfCanId" min="1" max="2047">
+			</div>
+		</div>
+	</div>
+	<div class="card">
+		<h2>应用</h2>
+		<div class="tip">写入 → 保存参数（持久化到 Flash）→ 重启设备（加载新配置）</div>
+		<div class="row">
+			<button class="btn pri" id="cfWriteBtn" onclick="applyCfg()">写入配置</button>
+			<button class="btn" id="cfSaveBtn" onclick="wsSave()">保存参数</button>
+			<button class="btn danger" onclick="rebootDev()">重启设备</button>
+			<button class="btn danger" onclick="factoryReset()">恢复出厂</button>
+		</div>
+	</div>
+</section>
+
+<!-- ================= 固件升级 ================= -->
+<section id="t-fw" class="hide">
+	<div class="card">
+		<h2>固件升级 <span class="badge y">MCUboot 签名镜像</span></h2>
+		<div class="tip">上传 signed.bin（MCUboot 签名镜像），写入 slot1 并校验 CRC 与签名 keyhash，成功后设备自动重启完成换</div>
+		<div class="up-drop" id="upDrop">
+			点击选择或拖拽固件文件到此处<br>
+			<span style="font-size:12px">支持 .bin（MCUboot signed image）</span>
+			<input type="file" id="upFile" class="hide" accept=".bin">
+		</div>
+		<div class="prog" id="upProg"><i></i></div>
+		<div class="msg" id="upMsg"></div>
+		<div class="row" style="margin-top:12px">
+			<button class="btn pri" id="upBtn" disabled onclick="doUpgrade()">开始升级</button>
+			<span class="hsub">升级过程约 1-2 分钟，请勿断电</span>
+		</div>
+	</div>
+	<div class="card">
+		<h2>当前固件</h2>
+		<div class="kv" id="fwKv"></div>
+	</div>
+</section>
+
+<footer>io-edge-hub · STM32F407VET6 · FreeRTOS</footer>
+</main>
+</div>
+
+<script>
+"use strict";
+const $=s=>document.querySelector(s);
+
+/* ---------------- Toast 通知 ---------------- */
+function toast(msg,type){
+	type=type||"ok";
+	const el=document.createElement("div");
+	el.className="toast "+type;
+	el.textContent=msg;
+	$("#toastBox").appendChild(el);
+	setTimeout(()=>el.remove(),3200);
+}
+
+/* ---------------- 确认弹窗 ---------------- */
+function showConfirm(msg){
+	return new Promise(resolve=>{
+		const mask=document.createElement("div");
+		mask.className="modal-mask";
+		mask.innerHTML='<div class="modal-box"><p>'+esc(msg)+'</p>'+
+			'<div class="modal-btns">'+
+			'<button class="btn" id="mCancel">取消</button>'+
+			'<button class="btn pri" id="mOk">确认</button></div></div>';
+		document.body.appendChild(mask);
+		mask.querySelector("#mCancel").onclick=()=>{mask.remove();resolve(false)};
+		mask.querySelector("#mOk").onclick=()=>{mask.remove();resolve(true)};
+		mask.onclick=e=>{if(e.target===mask){mask.remove();resolve(false)}};
+	});
+}
+function esc(s){const d=document.createElement("div");d.textContent=s;return d.innerHTML}
+let WS=null,wsTimer=null,pollTimer=null,upFileBuf=null;
+
+/* ---------------- 通用 ---------------- */
+async function api(path,opt){
+	const r=await fetch(path,Object.assign({headers:{"Content-Type":"application/json"}},opt));
+	const t=await r.text();
+	try{return JSON.parse(t)}catch(e){throw new Error(t||r.status)}
+}
+function esc(s){return String(s).replace(/[&<>"]/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c]))}
+function fmtBytes(n){return n>=1048576?(n/1048576).toFixed(2)+" MB":n>=1024?(n/1024).toFixed(1)+" KB":n+" B"}
+function fmtUp(ms){const s=Math.floor(ms/1000),d=Math.floor(s/86400),h=Math.floor(s%86400/3600),m=Math.floor(s%3600/60);
+	return d>0?d+" 天 "+h+" 小时":h>0?h+" 小时 "+m+" 分":m+" 分 "+(s%60)+" 秒"}
+
+/* ---------------- Tab 切换 ---------------- */
+let curTab="ov";
+const TAB_TIPS={ov:"板卡与固件基础信息",io:"16 路数字输入 · 8 路数字输出 · 4 路模拟输入",
+	rg:"保持寄存器 40001-40018 · 输入寄存器 30001-30006",hi:"LittleFS 历史采集文件",
+	cf:"网络 / Modbus / CAN 参数配置 (重启生效)",fw:"MCUboot 签名镜像升级"};
+document.querySelectorAll("#tabs button").forEach(b=>b.onclick=()=>{
+	document.querySelectorAll("#tabs button").forEach(x=>x.classList.toggle("on",x===b));
+	curTab=b.dataset.t;
+	["ov","io","rg","hi","cf","fw"].forEach(t=>$("#t-"+t).classList.toggle("hide",t!==curTab));
+	$("#hSub").textContent=TAB_TIPS[curTab]||"";
+	/* 数据来自 WS 推送缓存; 无缓存 (WS 未连上) 才单次 HTTP 兜底 */
+	if(curTab==="rg"){if(wsCache.regs)renderRegsTables(wsCache.regs);else loadRegsHTTP()}
+	if(curTab==="cf"&&wsCache.regs)fillCfgForm(wsCache.regs);
+	if(curTab==="hi")loadHist();
+	if(curTab==="ov"&&!wsCache.info)loadInfoHTTP();
+});
+
+/* ---------------- 概览 (数据来自 WS info 帧, HTTP 仅首次兜底) ---------------- */
+function renderInfo(d){
+	$("#hVer").textContent=d.version;
+	const kv=(o)=>Object.entries(o).map(([k,v])=>"<div>"+k+"</div><div>"+v+"</div>").join("");
+	$("#infoKv").innerHTML=kv({
+		"固件版本":d.version,"编译时间":d.build,"硬件平台":d.board,
+		"MCU 主频":(d.hclk_mhz||168)+" MHz","Flash / RAM":d.flash_kb+" KB / "+d.sram_kb+" KB",
+		"MAC 地址":d.mac,"IP 地址":d.ip+" /24","Modbus Slave ID":d.slave_id,
+		"RS485 波特率":d.rs485_baud,"CAN ID / 波特率":"0x"+d.can_id.toString(16).toUpperCase()+" / "+d.can_baud+" kbps"});
+	$("#statKv").innerHTML=kv({
+		"运行时长":fmtUp(d.uptime_ms),"系统时间":new Date(d.time*1000).toLocaleString(),
+		"历史记录":d.hist_en?"<span style='color:var(--on)'>已启用</span>":"<span style='color:var(--sub)'>已停用</span>",
+		"存储空间":"剩余 "+fmtBytes(d.lfs_free)+" / "+fmtBytes(d.lfs_total),
+		"网络链路":d.net_up?"<span style='color:var(--on)'>正常</span>":"<span style='color:var(--err)'>断开</span>",
+		"采样间隔":"DI "+d.di_ms+" ms · AI "+d.ai_ms+" ms"});
+	$("#fwKv").innerHTML=kv({"当前版本":d.version,"编译时间":d.build,"MCUboot":"swap-scratch",
+		"升级方式":"HTTP 上传 / UDP / CAN"});
+}
+async function loadInfoHTTP(){try{renderInfo(await api("/api/info"))}catch(e){}}
+
+/* ---------------- IO 渲染 ---------------- */
+let diEn=0xffff,aiEn=0xf;
+function buildIo(){
+	let h="";
+	for(let i=0;i<16;i++)h+="<div class='io-chip' id='di"+i+"'><div class='nm'>DI"+(i+1)+"</div><div class='st'>OFF</div></div>";
+	$("#diGrid").innerHTML=h;
+	h="";
+	for(let i=0;i<8;i++)h+="<div class='do-item'><span class='nm'>DO"+(i+1)+"</span><label class='sw'>"+
+		"<input type='checkbox' id='do"+i+"' onchange=\"setDo("+i+",this.checked)\"><i></i></label></div>";
+	$("#doGrid").innerHTML=h;
+	const ai=[["AI1","mA",20],["AI2","mA",20],["AI3","V",10],["AI4","V",10]];
+	$("#aiGrid").innerHTML=ai.map((a,i)=>"<div class='ai-card'><div class='nm'><span>"+a[0]+"</span><span>"+
+		(a[0].includes("1")||a[0].includes("2")?"4-20":"0-10")+a[1]+"</span></div>"+
+		"<div class='val'><span id='ai"+i+"'>--</span><small>"+a[1]+"</small></div>"+
+		"<div class='bar'><i id='abar"+i+"'></i></div></div>").join("");
+}
+function renderIo(d){
+	diEn=d.di_en;aiEn=d.ai_en;
+	for(let i=0;i<16;i++){const e=$("#di"+i);if(!e)continue;
+		e.classList.toggle("on",!!d.di[i]);e.classList.toggle("dis",!(diEn&(1<<i)));
+		e.querySelector(".st").textContent=(diEn&(1<<i))?(d.di[i]?"ON":"OFF"):"禁用";}
+	for(let i=0;i<8;i++){const e=$("#do"+i);if(e&&e.checked!==!!d.do[i])e.checked=!!d.do[i];}
+	for(let i=0;i<4;i++){const e=$("#ai"+i);if(!e)continue;
+		if(!(aiEn&(1<<i))){e.textContent="--";$("#abar"+i).style.width="0";continue}
+		const max=i<2?20:10,v=(d.ai[i]/100).toFixed(2);
+		e.textContent=v;
+		const bar=$("#abar"+i),pct=Math.min(100,Math.max(0,d.ai[i]/100/max*100));
+		bar.style.width=pct+"%";bar.classList.toggle("over",(i<2&&d.ai[i]/100<4)||d.ai[i]/100>max*1.02);}
+}
+async function loadIo(){try{renderIo(await api("/api/io"))}catch(e){}}
+async function setDo(i,v){
+	if(WS&&WS.readyState===1){
+		WS.send(JSON.stringify({cmd:"do",index:i,value:v?1:0}));
+		return;
+	}
+	try{
+		const r=await api("/api/do",{method:"POST",body:JSON.stringify({index:i,value:v?1:0})});
+		if(r.ok!==true)throw 0;
+	}catch(e){}
+}
+
+/* ---------------- 寄存器 ---------------- */
+const HR=[[0x00,"DO1-8 输出控制","w"],[0x01,"DI1-16 使能","w"],[0x02,"AI1-4 使能","w"],
+[0x03,"DI 采样间隔 ms","w"],[0x04,"AI 采样间隔 ms","w"],[0x05,"历史保存使能","w"],
+[0x06,"CAN ID","w"],[0x07,"CAN 波特率 x1000","w"],[0x08,"RS485 波特率","w"],
+[0x09,"Modbus Slave ID","w"],[0x0A,"IP 段1","w"],[0x0B,"IP 段2","w"],[0x0C,"IP 段3","w"],
+[0x0D,"IP 段4","w"],[0x0E,"时间戳高16位","w"],[0x0F,"时间戳低16位","w"],
+[0x10,"参数保存触发","btn"],[0x11,"重启触发","btn"]];
+const IR=[[0,"固件版本 MAJ<<12|MIN<<8|PAT"],[1,"AI1 电流 0.01mA"],[2,"AI2 电流 0.01mA"],
+[3,"AI3 电压 0.01V"],[4,"AI4 电压 0.01V"],[5,"DI1-16 状态 bitmap"]];
+/* 寄存器显示: Modbus 地址 (4xxxx/3xxxx) + 时间戳合成可读时间 */
+function mbAddr(base,addr){return base+addr}
+function fmtTs(hi,lo){
+	const t=((hi<<16)>>>0)+((lo>>>0)&0xFFFF);
+	if(t<946684800)return "未设置 (请先同步时间)";
+	return new Date(t*1000).toLocaleString("zh-CN",{hour12:false});
+}
+function regDisp(addr,d){
+	if(addr===0x0E)return d[0x0E]+" ("+fmtTs(d[0x0E],d[0x0F])+")";
+	if(addr===0x0F)return d[0x0F];
+	return d[addr];
+}
+/* 建表 (Tab 激活或缓存首次到达时) */
+function renderRegsTables(d){
+	$("#hrTbl").innerHTML="<tr><th>地址</th><th>名称</th><th>当前值</th><th>写入</th></tr>"+
+		HR.map(r=>{
+			const v=d.holding[r[0]];
+			if(r[2]==="btn")return "<tr><td class='mono'>"+mbAddr(40001,r[0])+
+				"</td><td>"+r[1]+"</td><td class='mono' id='hrv"+r[0]+"'>"+regDisp(r[0],d.holding)+"</td><td>"+
+				(r[0]===0x10?"<button class='btn sm' onclick='saveCfg()'>保存</button>":
+				"<button class='btn sm danger' onclick='rebootDev()'>重启</button>")+"</td></tr>";
+			return "<tr><td class='mono'>"+mbAddr(40001,r[0])+"</td><td>"+r[1]+
+				"</td><td class='mono' id='hrv"+r[0]+"'>"+regDisp(r[0],d.holding)+"</td><td><input type='number' id='hr"+r[0]+"' min='0' max='65535' value='"+v+
+				"' onchange=\"wrReg("+r[0]+",this.value)\"></td></tr>";}).join("");
+	$("#irTbl").innerHTML="<tr><th>地址</th><th>名称</th><th>当前值</th></tr>"+
+		IR.map(r=>"<tr><td class='mono'>"+mbAddr(30001,r[0])+"</td><td>"+r[1]+
+			"</td><td class='mono ro' id='irv"+r[0]+"'>"+d.input[r[0]]+"</td></tr>").join("");
+}
+/* 只刷新"当前值"单元格, 不重建表格 (避免打断正在输入的写入框) */
+function renderRegValues(d){
+	HR.forEach(r=>{const e=$("#hrv"+r[0]);if(e)e.textContent=regDisp(r[0],d.holding)});
+	IR.forEach(r=>{const e=$("#irv"+r[0]);if(e)e.textContent=d.input[r[0]]});
+}
+/* HTTP 兜底 (WS 未连上且无缓存时单次拉取) */
+async function loadRegsHTTP(){
+	try{const d=await api("/api/regs");
+		if(curTab==="rg")renderRegsTables(d)}catch(e){}
+}
+async function wrReg(a,v){
+	v=Number(v);if(!Number.isInteger(v)||v<0||v>65535){toast("请输入 0-65535 的整数","err");loadRegsHTTP();return}
+	if(a===0x11){rebootDev();return}
+	if(WS&&WS.readyState===1){
+		WS.send(JSON.stringify({cmd:"reg",addr:a,value:v}));return}
+	try{
+		const r=await api("/api/reg",{method:"POST",body:JSON.stringify({addr:a,value:v})});
+		if(r.ok!==true)toast("写入失败: "+(r.err||""),"err");
+	}catch(e){toast("写入失败","err")}
+}
+async function saveCfg(){
+	try{const r=await api("/api/save",{method:"POST",body:"{}"});
+		toast(r.ok?"参数已保存到 Flash":"保存失败",r.ok?"ok":"err")}catch(e){toast("保存失败","err")}
+}
+async function syncTime(){
+	const ts=Math.floor(Date.now()/1000);
+	try{const r=await api("/api/time",{method:"POST",body:JSON.stringify({ts})});
+		if(r.ok){toast("时间已同步")}else toast("时间设置失败","err")}catch(e){toast("时间设置失败","err")}
+}
+
+/* ---------------- 系统配置 (数据走 WS: regs 帧填充, cfg/save 命令写入) ---------------- */
+const CF_IP=["cfIp1","cfIp2","cfIp3","cfIp4"];
+const CF_IDS=CF_IP.concat(["cfRs","cfSid","cfCanB","cfCanId"]);
+let cfgDirty=false,cfgWriting=false;
+function setVal(id,v){const e=$("#"+id);
+	if(e&&!cfgDirty&&!cfgWriting)e.value=v}
+function fillCfgForm(d){
+	const h=d.holding;
+	CF_IP.forEach((id,i)=>setVal(id,h[0x0A+i]));
+	setVal("cfRs",h[0x08]);setVal("cfSid",h[0x09]);
+	setVal("cfCanB",h[0x07]);setVal("cfCanId",h[0x06]);
+}
+function markCfgDirty(){cfgDirty=true}
+function initCfgListeners(){CF_IDS.forEach(id=>{const e=$("#"+id);if(e){
+	e.addEventListener("input",markCfgDirty);
+	e.addEventListener("change",markCfgDirty)}})}
+/* WS 命令 ack: 发送时挂回调, 收到无 "t" 字段的 {"ok":..} 帧时触发 */
+let cfAckCb=null;
+function wsSendCmd(obj,ackCb){
+	if(!WS||WS.readyState!==1)return false;
+	cfAckCb=ackCb||null;
+	WS.send(JSON.stringify(obj));
+	return true;
+}
+function wsSend(obj){
+	return new Promise((res,rej)=>{
+		if(!WS||WS.readyState!==1)return rej("ws not connected");
+		const origCb=cfAckCb;
+		cfAckCb=r=>{cfAckCb=origCb;res(r)};
+		WS.send(JSON.stringify(obj));
+	});
+}
+function applyCfg(){
+	const ip=CF_IP.map(id=>Number($("#"+id).value));
+	const o={cmd:"cfg"};
+	if(ip.every(n=>Number.isInteger(n)))o.ip=ip.join(".");
+	const rs=Number($("#cfRs").value),sid=Number($("#cfSid").value);
+	const cb=Number($("#cfCanB").value),cid=Number($("#cfCanId").value);
+	if(Number.isInteger(rs))o.rs485=rs;
+	if(Number.isInteger(sid))o.sid=sid;
+	if(Number.isInteger(cb))o.can_bps=cb;
+	if(Number.isInteger(cid))o.can_id=cid;
+	const btn=$("#cfWriteBtn");btn.disabled=true;cfgWriting=true;
+	const done=r=>{btn.disabled=false;cfgWriting=false;
+		if(r.ok===true){cfgDirty=false;toast("配置已写入，重启后生效","ok")}
+		else toast("写入失败: "+(r.err||"参数非法"),"err")};
+	if(!wsSendCmd(o,done)){
+		/* WS 不在线 (FreeRTOS 版 httpd 暂无 /ws): cfg 走 HTTP 回退 */
+		const body={...o};delete body.cmd;
+		api("/api/cfg",{method:"POST",body:JSON.stringify(body)})
+			.then(done).catch(()=>done({ok:false,err:"http failed"}));
+	}
+}
+function wsSave(){
+	const btn=$("#cfSaveBtn");btn.disabled=true;
+	const done=r=>{btn.disabled=false;
+		toast(r.ok===true?"参数已保存到 Flash":"保存失败: "+(r.err||""),r.ok?"ok":"err")};
+	if(!wsSendCmd({cmd:"save"},done)){btn.disabled=false;saveCfg()}
+}
+async function rebootDev(){
+	if(!await showConfirm("确认重启设备？"))return;
+	try{await api("/api/reboot",{method:"POST",body:"{}"})}catch(e){}
+	toast("设备正在重启，约 15 秒后自动刷新","info");
+	setTimeout(()=>location.reload(),15000);
+}
+async function factoryReset(){
+	if(!await showConfirm("恢复出厂将清除全部已保存参数并重启设备，确认？"))return;
+	let r;
+	try{r=await wsSend({cmd:"factory_reset"})}catch(e){
+		toast("WebSocket 未连接","err");return}
+	if(!r||r.ok!==true){toast("恢复出厂失败: "+((r&&r.err)||"设备忙"),"err");return}
+	toast("已恢复出厂设置，设备重启中，约 20 秒后刷新","info");
+	setTimeout(()=>location.reload(),20000);
+}
+
+/* ---------------- 历史记录 ---------------- */
+async function loadHist(){
+	let d;try{d=await api("/api/history")}catch(e){return}
+	const t=$("#histTbl");
+	if(!d.files||!d.files.length){t.innerHTML="";$("#histEmpty").classList.remove("hide");
+		$("#histStat").textContent="";return}
+	$("#histEmpty").classList.add("hide");
+	$("#histStat").textContent="共 "+d.files.length+" 个文件，合计 "+
+		fmtBytes(d.files.reduce((s,f)=>s+f.size,0));
+	t.innerHTML="<tr><th>文件名</th><th>大小</th><th style='width:160px'>操作</th></tr>"+
+		d.files.map(f=>"<tr><td class='mono'>"+esc(f.name)+"</td><td>"+fmtBytes(f.size)+"</td><td>"+
+		"<a class='btn sm' href='/api/history/download?name="+encodeURIComponent(f.name)+"' download>下载</a> "+
+		"<button class='btn sm danger' onclick=\"delHist('"+esc(f.name)+"')\">删除</button></td></tr>").join("");
+}
+async function delHist(n){
+	if(!await showConfirm("删除文件 "+n+" ？"))return;
+	try{await api("/api/history/delete",{method:"POST",body:JSON.stringify({name:n})})}catch(e){}
+	loadHist();
+}
+
+/* ---------------- 固件升级 ---------------- */
+const drop=$("#upDrop"),fileIn=$("#upFile");
+drop.onclick=()=>fileIn.click();
+drop.ondragover=e=>{e.preventDefault();drop.classList.add("hover")};
+drop.ondragleave=()=>drop.classList.remove("hover");
+drop.ondrop=e=>{e.preventDefault();drop.classList.remove("hover");
+	if(e.dataTransfer.files.length)pickFile(e.dataTransfer.files[0])};
+fileIn.onchange=()=>{if(fileIn.files.length)pickFile(fileIn.files[0])};
+function pickFile(f){
+	upFileBuf=f;
+	drop.innerHTML="<b style='color:var(--txt)'>"+esc(f.name)+"</b> ("+fmtBytes(f.size)+")<br>"+
+		"<span style='font-size:12px'>点击重新选择</span>";
+	$("#upBtn").disabled=false;
+	setMsg("");
+}
+function setMsg(m,c){const e=$("#upMsg");e.textContent=m;e.className="msg "+(c||"")}
+
+/* MCUboot 镜像格式常量 */
+const IMG_MAGIC=0x96F3B83D;
+const IMG_TLV_INFO_MAGIC=0x6907;
+const IMG_TLV_KEYHASH=0x0001;
+
+/* 验证 MCUboot 镜像 magic 并提取 keyhash */
+async function parseFirmwareImage(file){
+	const buf=await file.arrayBuffer();
+	const view=new DataView(buf);
+
+	/* 校验 image magic (offset 0, LE32) */
+	const magic=view.getUint32(0,true);
+	if(magic!==IMG_MAGIC){
+		throw new Error("不是有效的 MCUboot 签名镜像 (magic 不匹配)");
+	}
+
+	/* 读取 header size (offset 8, LE16) 和 image size (offset 12, LE32) */
+	const hdrSize=view.getUint16(8,true);
+	const imgSize=view.getUint32(12,true);
+
+	if(hdrSize<32||(hdrSize&0x3)){
+		throw new Error("镜像头大小异常: "+hdrSize);
+	}
+	if(imgSize>buf.byteLength){
+		throw new Error("镜像大小异常: img_size "+imgSize+" > 文件大小 "+buf.byteLength);
+	}
+
+	/* 定位 TLV 区 */
+	const tlvOff=hdrSize+imgSize;
+	if(tlvOff+4>buf.byteLength){
+		throw new Error("TLV 区越界, 镜像可能被截断");
+	}
+
+	const tlvMagic=view.getUint16(tlvOff,true);
+	if(tlvMagic!==IMG_TLV_INFO_MAGIC){
+		throw new Error("TLV info magic 不匹配: 0x"+tlvMagic.toString(16));
+	}
+
+	/* 遍历 TLV 找 KEYHASH */
+	let keyhash=null;
+	let off=tlvOff+4;
+	while(off+4<=buf.byteLength){
+		const type=view.getUint16(off,true);
+		const tlvLen=view.getUint16(off+2,true);
+		if(type===0||tlvLen===0||off+4+tlvLen>buf.byteLength){
+			break;
+		}
+		if(type===IMG_TLV_KEYHASH&&tlvLen===32){
+			keyhash=new Uint8Array(buf,off+4,32);
+			break;
+		}
+		off+=4+tlvLen;
+	}
+
+	return{data:new Uint8Array(buf),size:buf.byteLength,keyhash:keyhash};
+}
+
+/* Base64 编码 */
+function toBase64(bytes){
+	let binary="";
+	for(let i=0;i<bytes.length;i++){
+		binary+=String.fromCharCode(bytes[i]);
+	}
+	return btoa(binary);
+}
+
+async function doUpgrade(){
+	if(!upFileBuf)return;
+	if(!await showConfirm("确认升级到 "+upFileBuf.name+" ？设备将自动重启"))return;
+	if(!WS||WS.readyState!==1){setMsg("WebSocket 未连接","err");return}
+	$("#upBtn").disabled=true;
+	const prog=$("#upProg");prog.style.display="block";
+
+	try{
+		/* 解析镜像并验证 magic, 提取 keyhash */
+		setMsg("校验镜像格式…");
+		const img=await parseFirmwareImage(upFileBuf);
+
+		if(!img.keyhash){
+			throw new Error("镜像未签名 (无 KEYHASH TLV)");
+		}
+
+		/* 将 keyhash 编码为 Base64, 随 fw_start 一起发送到设备端验证 */
+		const keyhashB64=toBase64(img.keyhash);
+		setMsg("擦除中…");
+		const r=await wsSend({cmd:"fw_start",size:img.size,keyhash:keyhashB64});
+		if(!r.ok){
+			if(r.err==="keyhash mismatch"){
+				throw new Error("设备拒绝: 签名密钥不匹配 (镜像签名密钥与设备不一致)");
+			}
+			throw new Error("启动失败: "+r.err);
+		}
+		setMsg("上传中…");
+		const total=img.size;
+		let off=0;
+		const CHUNK=10240;
+		while(off<total){
+			const end=Math.min(off+CHUNK,total);
+			const chunk=img.data.slice(off,end);
+			WS.send(chunk);
+			prog.querySelector("i").style.width=(end/total*100)+"%";
+			off=end;
+			await new Promise(r=>setTimeout(r,5));
+		}
+		const r2=await wsSend({cmd:"fw_end"});
+		prog.style.display="none";
+		if(r2.ok){
+			setMsg("校验通过，设备正在重启完成固件交换…","ok");
+			pollOnline();
+		}else{
+			throw new Error("升级失败: "+r2.err);
+		}
+	}catch(e){
+		prog.style.display="none";setMsg("升级失败: "+e.message,"err");
+	}
+	$("#upBtn").disabled=false;
+}
+function pollOnline(){
+	let n=0;
+	const t=setInterval(async()=>{
+		if(++n>60){clearInterval(t);setMsg("设备长时间未上线，请检查","warn");return}
+		try{await api("/api/info");clearInterval(t);location.reload()}catch(e){}
+	},3000);
+}
+
+/* ---------------- WebSocket (页面数据主通道) ---------------- */
+let wsRetries=0;
+const wsCache={info:null,regs:null};
+function wsConnect(){
+	try{WS&&WS.close()}catch(e){}
+	WS=new WebSocket("ws://"+location.host+"/ws");
+	WS.onopen=()=>{
+		wsRetries=0;
+		$("#wsDot").classList.add("ok");$("#wsTxt").textContent="实时";
+		clearInterval(pollTimer);pollTimer=null;
+	};
+	WS.onmessage=e=>{
+		let d;try{d=JSON.parse(e.data)}catch(err){return}
+		if(d.t===undefined){
+			/* 命令 ack 帧 ({"ok":..}) */
+			if(cfAckCb){const cb=cfAckCb;cfAckCb=null;cb(d)}
+			return;
+		}
+		switch(d.t){
+		case "io":renderIo(d);break;
+		case "regs":
+			wsCache.regs=d;
+			/* 表已建且寄存器页激活 → 只刷值; 表未建且激活 → 建表 */
+			if(curTab==="rg"){
+				if($("#hrv0"))renderRegValues(d);else renderRegsTables(d);
+			}
+			if(curTab==="cf")fillCfgForm(d);
+			break;
+		case "info":
+			wsCache.info=d;
+			if(curTab==="ov")renderInfo(d);
+			break;
+		}
+	};
+	WS.onclose=WS.onerror=()=>{
+		$("#wsDot").classList.remove("ok");$("#wsTxt").textContent="离线";
+		WS=null;
+		/* WS 断开时才降级 HTTP 轮询 (WS 正常时页面零轮询请求) */
+		if(!pollTimer){pollTimer=setInterval(wsFallbackPoll,2000);wsFallbackPoll();}
+		/* 指数退避: 1s→2s→4s→…→10s, 避免疯狂重连 */
+		const delay=Math.min(1000*Math.pow(2,wsRetries++),10000);
+		clearTimeout(wsTimer);wsTimer=setTimeout(wsConnect,delay);
+	};
+}
+/* WS 断连兜底: 2s 拉 io; 寄存器页/概览页激活时顺带拉对应数据 */
+let fbCount=0;
+async function wsFallbackPoll(){
+	try{renderIo(await api("/api/io"))}catch(e){return}
+	if(++fbCount%5===0&&curTab==="ov")loadInfoHTTP();
+	if(curTab==="rg"){try{const d=await api("/api/regs");
+		if($("#hrv0"))renderRegValues(d);else renderRegsTables(d)}catch(e){}}
+}
+
+/* ---------------- 时钟 ---------------- */
+setInterval(()=>{const d=new Date();
+	$("#hClock").textContent=d.toLocaleTimeString("zh-CN",{hour12:false})},1000);
+
+/* ---------------- 启动 ---------------- */
+buildIo();
+initCfgListeners();
+loadInfoHTTP();	/* 首屏 (WS 连上后由 info 帧接管) */
+loadIo();	/* 首屏 (WS 连上后由 io 帧接管) */
+wsConnect();
+</script>
+</body>
+</html>

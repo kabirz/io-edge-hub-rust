@@ -1,0 +1,8 @@
+/target
+/build
+/keys
+*.pem
+*.log
+tmp_*
+__pycache__/
+.pytest_cache/
