@@ -12,8 +12,10 @@ mod net;
 mod reboot;
 mod rtu;
 mod sampling;
+mod shell;
 mod storage;
 mod systime;
+mod uart_raw;
 mod w25q;
 
 use embassy_executor::Spawner;
@@ -89,13 +91,10 @@ async fn main(spawner: Spawner) {
     }
     let dp = embassy_stm32::init(board_config());
 
-    // USART1 console: PA9 TX / PA10 RX @115200 (same as C firmware)
-    let uart = Uart::new_blocking(dp.USART1, dp.PA10, dp.PA9, UartConfig::default())
-        .ok()
-        .expect("usart1 config");
-    let (tx, rx) = uart.split();
-    log::init(tx);
-    let _shell_rx = rx; // shell lands in M7
+    // console + shell UART: raw USART1 (uart_raw) — sync TX for the logger,
+    // DMA circular RX that survives NOR flash freezes; then spawn the shell
+    uart_raw::init();
+    spawner.spawn(shell::shell_task().expect("spawn sh"));
     use core::fmt::Write as _;
     let mut banner = heapless::String::<64>::new();
     banner

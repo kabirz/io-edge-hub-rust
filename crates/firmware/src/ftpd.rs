@@ -595,7 +595,7 @@ async fn cmd_retr(ctrl: &mut TcpSocket<'static>, data: &mut TcpSocket<'static>, 
         return;
     }
     // chunked read via the storage RPC; ASCII converts \n -> \r\n
-    let mut chunk_ascii = [0u8; 1024];
+    let mut chunk_ascii = [0u8; 4096];
     loop {
         let seq = rpc_send(StorageCmd::FileChunk);
         if !rpc_wait(seq).await {
@@ -604,7 +604,7 @@ async fn cmd_retr(ctrl: &mut TcpSocket<'static>, data: &mut TcpSocket<'static>, 
         let (chunk, len) = critical_section::with(|_cs| {
             crate::storage::FILE_DL.lock(|f| {
                 let g = f.borrow();
-                let mut c = [0u8; 512];
+                let mut c = [0u8; 2048];
                 c[..g.chunk_len].copy_from_slice(&g.chunk[..g.chunk_len]);
                 (c, g.chunk_len)
             })

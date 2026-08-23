@@ -17,7 +17,7 @@ embassy-sync = "0.8.0"
 embassy-futures = "0.1.1"
 embassy-embedded-hal = "0.6.0"
 critical-section = "1.2.0"
-embassy-net = { version = "0.9.0", features = ["proto-ipv4", "medium-ethernet", "tcp", "udp"] }
+embassy-net = { version = "0.9.0", features = ["proto-ipv4", "medium-ethernet", "tcp", "udp", "auto-icmp-echo-reply"] }
 embassy-net-driver-channel = "0.4.0"
 embassy-net-wiznet = "0.3.0"
 static_cell = "2"

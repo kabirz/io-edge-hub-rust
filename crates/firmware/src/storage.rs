@@ -172,7 +172,7 @@ pub struct FileDl {
     pub name: [u8; 24],
     pub size: u32,
     pub sent: u32,
-    pub chunk: [u8; 512],
+    pub chunk: [u8; 2048],
     pub chunk_len: usize,
     pub open: bool,
     pub eof: bool,
@@ -184,7 +184,7 @@ pub static FILE_DL: Mutex<CriticalSectionRawMutex, RefCell<FileDl>> = Mutex::new
         name: [0; 24],
         size: 0,
         sent: 0,
-        chunk: [0; 512],
+        chunk: [0; 2048],
         chunk_len: 0,
         open: false,
         eof: false,
@@ -359,7 +359,13 @@ impl HistState {
     }
 
     fn set(&mut self, n: &[u8]) {
-        let l = n.len().min(23);
+        // find_latest hands a NUL-padded [u8; 24]: trim at the terminator or
+        // the embedded NULs poison path() and the resume becomes a create
+        let l = n
+            .iter()
+            .position(|&b| b == 0)
+            .unwrap_or(n.len())
+            .min(23);
         self.name[..l].copy_from_slice(&n[..l]);
         self.name[l] = 0;
         self.name_len = l;
@@ -1080,7 +1086,7 @@ fn file_chunk(_fs: &mut Filesystem<'_, LfsNor>) -> bool {
         });
         return true;
     }
-    let mut buf = [0u8; 512];
+    let mut buf = [0u8; 2048];
     let n = critical_section::with(|_cs| {
         DOWNLOAD_FILE.lock(|d| {
             let mut g = d.borrow_mut();

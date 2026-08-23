@@ -220,6 +220,16 @@ async fn udp_task(stack: Stack<'static>) {
             continue;
         }
 
+        // debug: cmd 0xFA dumps shell RX counters (dma-consumed / processed)
+        if cmd == 0xFA {
+            let mut rep = [0u8; 9];
+            rep[0] = 0xFA;
+            rep[1..5].copy_from_slice(&crate::shell::RX_COUNT.load(core::sync::atomic::Ordering::Relaxed).to_le_bytes());
+            rep[5..9].copy_from_slice(&crate::shell::RX_GOT.load(core::sync::atomic::Ordering::Relaxed).to_le_bytes());
+            sock.send_to(&rep, meta.endpoint).await.ok();
+            continue;
+        }
+
         // debug: cmd 0xFB dumps fw upgrade diagnostics (finish failure cause)
         if cmd == 0xFB {
             let d = critical_section::with(|_cs| crate::fw::FW_DBG.lock(|f| *f.borrow()));

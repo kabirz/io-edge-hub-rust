@@ -1,23 +1,13 @@
 //! USART1 console logging with the C firmware's line format
 //! `[HH:MM:SS.mmm][L] message`.
+//!
+//! TX is the raw-register poll in uart_raw (safe under critical sections);
+//! the shell's RX lives there too (DMA circular, freeze-proof).
 
-use core::cell::RefCell;
 use core::fmt::Write as _;
 
-use embassy_stm32::usart::UartTx;
-use embassy_sync::blocking_mutex::Mutex;
-use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
-
 use crate::systime;
-
-static TX: Mutex<CriticalSectionRawMutex, RefCell<Option<UartTx<'static, embassy_stm32::mode::Blocking>>>> =
-    Mutex::new(RefCell::new(None));
-
-pub fn init(tx: UartTx<'static, embassy_stm32::mode::Blocking>) {
-    critical_section::with(|_cs| {
-        TX.lock(|t| *t.borrow_mut() = Some(tx));
-    });
-}
+use crate::uart_raw;
 
 pub fn log(level: char, msg: &str) {
     let epoch = systime::now_epoch();
@@ -32,13 +22,7 @@ pub fn log(level: char, msg: &str) {
         level,
         msg
     );
-    critical_section::with(|_cs| {
-        TX.lock(|t| {
-            if let Some(tx) = t.borrow_mut().as_mut() {
-                tx.blocking_write(line.as_bytes()).ok();
-            }
-        });
-    });
+    uart_raw::write(line.as_bytes());
 }
 
 pub fn inf(msg: &str) {
@@ -51,4 +35,15 @@ pub fn wrn(msg: &str) {
 
 pub fn err(msg: &str) {
     log('E', msg);
+}
+
+/// Untagged shell line (log_line in log.c): message + CRLF, no timestamp.
+pub fn line(msg: &str) {
+    raw(msg.as_bytes());
+    raw(b"\r\n");
+}
+
+/// Raw bytes straight to the wire (log_raw): shell prompt/echo/redraw.
+pub fn raw(bytes: &[u8]) {
+    uart_raw::write(bytes);
 }

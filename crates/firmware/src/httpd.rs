@@ -433,7 +433,7 @@ Content-Disposition: attachment; filename=\"{}\"\r\n\r\n",
                 let chunk = critical_section::with(|_cs| {
                     crate::storage::FILE_DL.lock(|f| {
                         let g = f.borrow();
-                        let mut c = [0u8; 512];
+                        let mut c = [0u8; 2048];
                         c[..g.chunk_len].copy_from_slice(&g.chunk[..g.chunk_len]);
                         (c, g.chunk_len)
                     })
