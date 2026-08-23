@@ -59,12 +59,56 @@ pub enum StorageCmd {
     FileOpen([u8; 24]),
     /// Web RPC: fill FILE_DL.chunk with the next block (512 B).
     FileChunk,
+    /// FTP RPC: stat a path (result in FTP_RES).
+    FtpStat(FtpPath),
+    /// FTP RPC: list a directory (result in FTP_LS).
+    FtpLs(FtpPath),
+    /// FTP RPC: open for sequential read at offset (FILE_DL).
+    FtpOpenRead { path: FtpPath, rest: u32 },
+    /// FTP RPC: open for write (result in FTP_RES; mode like ftpd.c cmd_stor).
+    FtpOpenWrite { path: FtpPath, mode: FtpWrMode },
+    /// FTP RPC: write WBUF[..len] to the open write handle.
+    FtpWriteChunk(usize),
+    /// FTP RPC: close + sync the write handle (result in FTP_RES).
+    FtpCloseWrite,
+    /// FTP RPC: remove file/dir (result in FTP_RES).
+    FtpRemove(FtpPath),
+    /// FTP RPC: mkdir (result in FTP_RES).
+    FtpMkdir(FtpPath),
+    /// FTP RPC: rename (result in FTP_RES).
+    FtpRename(FtpPath, FtpPath),
 }
 
+/// FTP path buffer (norm_path output can exceed 24 bytes).
+pub type FtpPath = [u8; 96];
+
+#[derive(Debug, Clone, Copy)]
+pub enum FtpWrMode {
+    Trunc,
+    Append,
+    Rest(u32),
+}
+
+/// Result register for one-shot FTP ops (single FTP op in flight at a time:
+/// the C server also serializes transfers).
+pub static FTP_RES: Mutex<CriticalSectionRawMutex, RefCell<(bool, bool, u32)>> =
+    Mutex::new(RefCell::new((false, false, 0))); // (ok, is_dir, size)
+
+/// Directory listing for FTP: 16 entries x [24 name | 4 BE size | 1 type].
+pub static FTP_LS: Mutex<CriticalSectionRawMutex, RefCell<([[u8; 32]; 16], usize)>> =
+    Mutex::new(RefCell::new(([ [0; 32]; 16 ], 0)));
+
+/// Write staging buffer shared with the ftpd task (filled under cs, drained
+/// by FtpWriteChunk).
+pub static WBUF: Mutex<CriticalSectionRawMutex, RefCell<[u8; 512]>> =
+    Mutex::new(RefCell::new([0; 512]));
+
 /// Root-listing + usage snapshot refreshed on SnapReq (history_web_list_json
-/// + history_web_usage). 10 entries x (20 B NUL-padded name + 4 B BE size).
+/// + history_web_usage). 16 entries x (20 B NUL-padded name + 4 B BE size):
+/// the C side caps the JSON at HTTP_BODY_BUF 704 (~13 entries), littlefs
+/// root can hold a few more during heavy test runs.
 pub struct FsSnap {
-    pub entries: [[u8; 24]; 10],
+    pub entries: [[u8; 24]; 16],
     pub count: usize,
     pub free: u32,
     pub total: u32,
@@ -73,7 +117,7 @@ pub struct FsSnap {
 
 pub static FS_SNAP: Mutex<CriticalSectionRawMutex, RefCell<FsSnap>> =
     Mutex::new(RefCell::new(FsSnap {
-        entries: [[0; 24]; 10],
+        entries: [[0; 24]; 16],
         count: 0,
         free: 0,
         total: 0x00F1_0000, // littlefs partition size
@@ -98,6 +142,7 @@ struct AllocCell(UnsafeCell<MaybeUninit<FileAllocation<LfsNor>>>);
 unsafe impl Sync for AllocCell {}
 static FILE_ALLOC: AllocCell = AllocCell(UnsafeCell::new(MaybeUninit::zeroed()));
 static DL_ALLOC: AllocCell = AllocCell(UnsafeCell::new(MaybeUninit::zeroed()));
+static WR_ALLOC: AllocCell = AllocCell(UnsafeCell::new(MaybeUninit::zeroed()));
 
 /// Init once from the storage task; returns the stable &'static mut.
 unsafe fn alloc_get(cell: &AllocCell) -> &'static mut FileAllocation<LfsNor> {
@@ -115,6 +160,12 @@ struct DlFile(Option<File<'static, 'static, LfsNor>>);
 unsafe impl Send for DlFile {}
 static DOWNLOAD_FILE: Mutex<CriticalSectionRawMutex, RefCell<DlFile>> =
     Mutex::new(RefCell::new(DlFile(None)));
+
+/// FTP write handle (STOR/APPE): persistent like the history file.
+struct WrFile(Option<File<'static, 'static, LfsNor>>);
+unsafe impl Send for WrFile {}
+static WR_FILE: Mutex<CriticalSectionRawMutex, RefCell<WrFile>> =
+    Mutex::new(RefCell::new(WrFile(None)));
 
 /// Chunked-download state machine shared between httpd and the storage task.
 pub struct FileDl {
@@ -587,7 +638,306 @@ pub async fn storage_task() {
                 let _ = file_chunk(&mut *fs);
                 RPC_SEQ.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
             }
+            StorageCmd::FtpStat(path) => {
+                ftp_stat(&mut *fs, path);
+                RPC_SEQ.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+            }
+            StorageCmd::FtpLs(path) => {
+                ftp_ls(&mut *fs, path);
+                RPC_SEQ.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+            }
+            StorageCmd::FtpOpenRead { path, rest } => {
+                let ok = ftp_open_read(&mut *fs, path, rest);
+                let size = critical_section::with(|_cs| FILE_DL.lock(|f| f.borrow().size));
+                critical_section::with(|_cs| {
+                    FTP_RES.lock(|r| *r.borrow_mut() = (ok, false, size));
+                });
+                RPC_SEQ.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+            }
+            StorageCmd::FtpOpenWrite { path, mode } => {
+                ftp_open_write(&mut *fs, path, mode);
+                RPC_SEQ.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+            }
+            StorageCmd::FtpWriteChunk(len) => {
+                ftp_write_chunk(len);
+                RPC_SEQ.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+            }
+            StorageCmd::FtpCloseWrite => {
+                ftp_close_write();
+                RPC_SEQ.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+            }
+            StorageCmd::FtpRemove(path) => {
+                let ok = ftp_path_op(&mut *fs, path, FtpOp::Remove);
+                critical_section::with(|_cs| {
+                    FTP_RES.lock(|r| *r.borrow_mut() = (ok, false, 0));
+                });
+                RPC_SEQ.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+            }
+            StorageCmd::FtpMkdir(path) => {
+                let ok = ftp_path_op(&mut *fs, path, FtpOp::Mkdir);
+                critical_section::with(|_cs| {
+                    FTP_RES.lock(|r| *r.borrow_mut() = (ok, false, 0));
+                });
+                RPC_SEQ.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+            }
+            StorageCmd::FtpRename(from, to) => {
+                let ok = ftp_rename(&mut *fs, &from, &to);
+                critical_section::with(|_cs| {
+                    FTP_RES.lock(|r| *r.borrow_mut() = (ok, false, 0));
+                });
+                RPC_SEQ.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+            }
         }
+    }
+}
+
+// ==================== FTP storage ops (ftpd.c littlefs access) ====================
+
+enum FtpOp {
+    Remove,
+    Mkdir,
+}
+
+fn ftp_path_of(path: &FtpPath) -> Option<&littlefs2::path::Path> {
+    let len = path.iter().position(|&b| b == 0).unwrap_or(0);
+    if len == 0 || len >= path.len() {
+        return None;
+    }
+    littlefs2::path::Path::from_bytes_with_nul(&path[..len + 1]).ok()
+}
+
+fn ftp_stat(fs: &mut Filesystem<'_, LfsNor>, path: FtpPath) {
+    let res = match ftp_path_of(&path).and_then(|p| fs.metadata(p).ok()) {
+        Some(md) => (true, md.is_dir(), md.len() as u32),
+        None => (false, false, 0),
+    };
+    critical_section::with(|_cs| {
+        FTP_RES.lock(|r| *r.borrow_mut() = res);
+    });
+}
+
+fn ftp_ls(fs: &mut Filesystem<'_, LfsNor>, path: FtpPath) {
+    let mut out: ([[u8; 32]; 16], usize) = ([[0; 32]; 16], 0);
+    let p = match ftp_path_of(&path) {
+        Some(p) => p,
+        None => {
+            critical_section::with(|_cs| {
+                FTP_LS.lock(|l| *l.borrow_mut() = out);
+            });
+            return;
+        }
+    };
+    // single file listed as a one-line directory (cmd_list LFS_TYPE_REG path)
+    if let Ok(md) = fs.metadata(p) {
+        if !md.is_dir() {
+            let b = p.as_str().as_bytes();
+            let base_start = b.iter().rposition(|&c| c == b'/').map(|i| i + 1).unwrap_or(0);
+            let base = &b[base_start..];
+            let l = base.len().min(23);
+            out.0[0][..l].copy_from_slice(&base[..l]);
+            out.0[0][24] = (md.len() as u32 >> 24) as u8;
+            out.0[0][25] = (md.len() as u32 >> 16) as u8;
+            out.0[0][26] = (md.len() as u32 >> 8) as u8;
+            out.0[0][27] = md.len() as u8;
+            out.0[0][28] = 2; // file marker
+            out.1 = 1;
+            critical_section::with(|_cs| {
+                FTP_LS.lock(|l| *l.borrow_mut() = out);
+            });
+            return;
+        }
+    }
+    fs.read_dir_and_then(p, |dir| {
+        for entry in dir.flatten() {
+            if out.1 >= 16 {
+                break;
+            }
+            let b = entry.file_name().as_str().as_bytes();
+            let l = b.len().min(23);
+            if b == b"." || b == b".." {
+                continue;
+            }
+            let size = entry.metadata().len() as u32;
+            out.0[out.1][..l].copy_from_slice(&b[..l]);
+            out.0[out.1][24] = (size >> 24) as u8;
+            out.0[out.1][25] = (size >> 16) as u8;
+            out.0[out.1][26] = (size >> 8) as u8;
+            out.0[out.1][27] = size as u8;
+            out.0[out.1][28] = if entry.file_type().is_dir() { 1 } else { 2 };
+            out.1 += 1;
+        }
+        Ok(())
+    })
+    .ok();
+    critical_section::with(|_cs| {
+        FTP_LS.lock(|l| *l.borrow_mut() = out);
+    });
+}
+
+/// Open for chunked read at `rest` (cmd_retr + REST).
+fn ftp_open_read(fs: &mut Filesystem<'_, LfsNor>, path: FtpPath, rest: u32) -> bool {
+    // reset FILE_DL + close any stale read handle
+    critical_section::with(|_cs| {
+        DOWNLOAD_FILE.lock(|d| {
+            if let Some(f) = d.borrow_mut().0.take() {
+                unsafe {
+                    let _ = f.close();
+                }
+            }
+        })
+    });
+    critical_section::with(|_cs| {
+        FILE_DL.lock(|f| {
+            let mut g = f.borrow_mut();
+            g.open = false;
+            g.eof = false;
+            g.err = false;
+            g.size = 0;
+            g.sent = 0;
+            g.chunk_len = 0;
+        })
+    });
+    let p = match ftp_path_of(&path) {
+        Some(p) => p,
+        None => return false,
+    };
+    let fs: &'static mut Filesystem<'static, LfsNor> = unsafe { core::mem::transmute(fs) };
+    let mut opts = OpenOptions::new();
+    opts.read(true);
+    let alloc = unsafe { alloc_get(&DL_ALLOC) };
+    match unsafe { opts.open(fs, alloc, p) } {
+        Ok(mut file) => {
+            let mut size = file.len().unwrap_or(0) as u32;
+            if rest > 0 {
+                if file.seek(lfs_io::SeekFrom::Start(rest)).is_err() {
+                    unsafe {
+                        let _ = file.close();
+                    }
+                    return false;
+                }
+                size = size.saturating_sub(rest);
+            }
+            critical_section::with(|_cs| {
+                FILE_DL.lock(|f| {
+                    let mut g = f.borrow_mut();
+                    g.name = [0; 24];
+                    g.size = size; // remaining bytes from the offset
+                    g.open = true;
+                })
+            });
+            critical_section::with(|_cs| {
+                DOWNLOAD_FILE.lock(|d| d.borrow_mut().0 = Some(file))
+            });
+            true
+        }
+        Err(_) => false,
+    }
+}
+
+fn ftp_open_write(fs: &mut Filesystem<'_, LfsNor>, path: FtpPath, mode: FtpWrMode) {
+    ftp_close_write_quiet();
+    let p = match ftp_path_of(&path) {
+        Some(p) => p,
+        None => {
+            critical_section::with(|_cs| {
+                FTP_RES.lock(|r| *r.borrow_mut() = (false, false, 0));
+            });
+            return;
+        }
+    };
+    let fs: &'static mut Filesystem<'static, LfsNor> = unsafe { core::mem::transmute(fs) };
+    let mut opts = OpenOptions::new();
+    opts.write(true).create(true);
+    match mode {
+        FtpWrMode::Append => {
+            opts.append(true);
+        }
+        FtpWrMode::Trunc => {
+            opts.truncate(true);
+        }
+        FtpWrMode::Rest(_) => {}
+    }
+    let alloc = unsafe { alloc_get(&WR_ALLOC) };
+    let ok = match unsafe { opts.open(fs, alloc, p) } {
+        Ok(mut file) => {
+            let seek_ok = match mode {
+                FtpWrMode::Append => file.seek(lfs_io::SeekFrom::End(0)).is_ok(),
+                FtpWrMode::Rest(pos) => file.seek(lfs_io::SeekFrom::Start(pos)).is_ok(),
+                FtpWrMode::Trunc => true,
+            };
+            if seek_ok {
+                critical_section::with(|_cs| {
+                    WR_FILE.lock(|w| w.borrow_mut().0 = Some(file))
+                });
+                true
+            } else {
+                unsafe {
+                    let _ = file.close();
+                }
+                false
+            }
+        }
+        Err(_) => false,
+    };
+    critical_section::with(|_cs| {
+        FTP_RES.lock(|r| *r.borrow_mut() = (ok, false, 0));
+    });
+}
+
+fn ftp_write_chunk(len: usize) {
+    // copy the staging buffer out first (short critical section), then write
+    let mut buf = [0u8; 512];
+    critical_section::with(|_cs| {
+        WBUF.lock(|b| {
+            let g = b.borrow();
+            buf.copy_from_slice(&g[..]);
+        });
+    });
+    let l = len.min(512);
+    let _ = critical_section::with(|_cs| {
+        WR_FILE.lock(|w| {
+            let mut g = w.borrow_mut();
+            match g.0.as_mut() {
+                Some(file) => file.write(&buf[..l]).unwrap_or(0),
+                None => 0,
+            }
+        })
+    });
+}
+
+fn ftp_close_write_quiet() {
+    critical_section::with(|_cs| {
+        WR_FILE.lock(|w| {
+            if let Some(f) = w.borrow_mut().0.take() {
+                unsafe {
+                    let _ = f.close();
+                }
+            }
+        })
+    });
+}
+
+fn ftp_close_write() {
+    ftp_close_write_quiet();
+    critical_section::with(|_cs| {
+        FTP_RES.lock(|r| *r.borrow_mut() = (true, false, 0));
+    });
+}
+
+fn ftp_path_op(fs: &mut Filesystem<'_, LfsNor>, path: FtpPath, op: FtpOp) -> bool {
+    match ftp_path_of(&path) {
+        Some(p) => match op {
+            FtpOp::Remove => fs.remove(p).is_ok(),
+            FtpOp::Mkdir => fs.create_dir(p).is_ok(),
+        },
+        None => false,
+    }
+}
+
+fn ftp_rename(fs: &mut Filesystem<'_, LfsNor>, from: &FtpPath, to: &FtpPath) -> bool {
+    match (ftp_path_of(from), ftp_path_of(to)) {
+        (Some(f), Some(t)) => fs.rename(f, t).is_ok(),
+        _ => false,
     }
 }
 
@@ -606,7 +956,7 @@ fn path_of(name: &[u8; 24]) -> Option<&littlefs2::path::Path> {
 /// history_web_usage equivalents).
 fn fs_snapshot(fs: &mut Filesystem<'_, LfsNor>) -> bool {
     let mut snap = FsSnap {
-        entries: [[0; 24]; 10],
+        entries: [[0; 24]; 16],
         count: 0,
         free: 0,
         total: 0x00F1_0000,
@@ -614,7 +964,7 @@ fn fs_snapshot(fs: &mut Filesystem<'_, LfsNor>) -> bool {
     };
     fs.read_dir_and_then(b"/\0".try_into().unwrap(), |dir| {
         for entry in dir.flatten() {
-            if snap.count >= 10 {
+            if snap.count >= snap.entries.len() {
                 break;
             }
             let b = entry.file_name().as_str().as_bytes();

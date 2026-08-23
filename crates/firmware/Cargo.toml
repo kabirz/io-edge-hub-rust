@@ -29,8 +29,6 @@ embedded-io-async = "0.7.0"
 embedded-hal = "1.0.0"
 heapless = "0.8.0"
 
-defmt = "1.1"
-defmt-rtt = "0.4"
 
 [build-dependencies]
 flate2 = "1"

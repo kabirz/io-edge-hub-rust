@@ -348,7 +348,8 @@ async fn dispatch(sock: &mut TcpSocket<'static>, method: &str, target: &[u8], bo
         {
             let _ = rpc_wait(seq).await;
         }
-        let mut b = heapless::String::<512>::new();
+        // C builds this into HTTP_BODY_BUF 704 and stops ~64 B before the end
+        let mut b = heapless::String::<704>::new();
         let _ = write!(b, "{{\"files\":[");
         let snap = critical_section::with(|_cs| {
             crate::storage::FS_SNAP.lock(|s| {
@@ -360,6 +361,9 @@ async fn dispatch(sock: &mut TcpSocket<'static>, method: &str, target: &[u8], bo
             let e = &snap.0[i];
             let name_end = e[..20].iter().position(|&c| c == 0).unwrap_or(20);
             let size = u32::from_be_bytes([e[20], e[21], e[22], e[23]]);
+            if b.len() + 64 > b.capacity() {
+                break;
+            }
             let _ = write!(
                 b,
                 "{}{{\"name\":\"{}\",\"size\":{}}}",

@@ -105,7 +105,6 @@ pub async fn setup(spawner: &embassy_executor::Spawner, p: NetPins) -> &'static 
     static STATE: StaticCell<embassy_net_wiznet::State<4, 4>> = StaticCell::new();
     let state = STATE.init(embassy_net_wiznet::State::new());
     crate::log::inf("net: spi up, w5500 init");
-    defmt::info!("net: spi up, entering w5500 init");
     let mac = derive_mac_from_uid();
     let (device, runner) = match embassy_net_wiznet::new::<_, _, embassy_net_wiznet::chip::W5500, _, _, _>(
         mac,
@@ -125,7 +124,6 @@ pub async fn setup(spawner: &embassy_executor::Spawner, p: NetPins) -> &'static 
         }
     };
     crate::log::inf("net: w5500 chip ok");
-    defmt::info!("net: w5500 chip ok");
 
     let ip = critical_section::with(|_cs| {
         REGS.lock(|r| {
@@ -144,7 +142,8 @@ pub async fn setup(spawner: &embassy_executor::Spawner, p: NetPins) -> &'static 
         dns_servers: Default::default(),
     });
 
-    static RES: StaticCell<embassy_net::StackResources<12>> = StaticCell::new();
+    // 13 live sockets: udp 1 + mbtcp 3 + httpd 2 + ftp (3x ctrl+data) + ftp rejector
+    static RES: StaticCell<embassy_net::StackResources<16>> = StaticCell::new();
     static STACK: StaticCell<Stack<'static>> = StaticCell::new();
     let (stack, net_runner) = embassy_net::new(
         device,

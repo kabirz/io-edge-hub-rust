@@ -1,8 +1,8 @@
 ﻿#![no_std]
 #![no_main]
-use defmt_rtt as _;
 
 mod appstate;
+mod ftpd;
 mod httpd;
 mod io_gpio;
 mod log;
@@ -72,7 +72,6 @@ async fn main(spawner: Spawner) {
         cortex_m::interrupt::enable();
     }
     let dp = embassy_stm32::init(board_config());
-    defmt::info!("post-init");
 
     // USART1 console: PA9 TX / PA10 RX @115200 (same as C firmware)
     let uart = Uart::new_blocking(dp.USART1, dp.PA10, dp.PA9, UartConfig::default())
@@ -87,7 +86,6 @@ async fn main(spawner: Spawner) {
         .write_fmt(format_args!("io-edge-hub rust {} boot", appstate::version::FW_VERSION))
         .ok();
     log::inf(&banner);
-    defmt::info!("banner");
 
     // DO8 on PD7-PD14, LED8 mirror on PE8-PE15 (idle low)
     io_gpio::init(
@@ -113,13 +111,10 @@ async fn main(spawner: Spawner) {
         ],
     );
 
-    defmt::info!("post-gpio");
 
     // RTC-backed system time (VBAT persistent)
     let (rtc, tp) = Rtc::new(dp.RTC, RtcConfig::default());
-    defmt::info!("post-rtc-new");
     systime::init(rtc, &tp);
-    defmt::info!("post-systime");
 
     // W25Q128 NOR on SPI1 (PA5/6/7, CS PA4): config store + littlefs.
     // Config loads synchronously before net bring-up (IP comes from cfg);
@@ -162,7 +157,6 @@ async fn main(spawner: Spawner) {
     )
     .await;
     log::inf("net: W5500 up, udp 8600");
-    defmt::info!("net: setup complete, spawning tasks");
     spawner.spawn(heartbeat(wdt, led, *stack).expect("spawn hb"));
 
     // Modbus TCP :502: 2 serving sockets (3rd client finds no listener -> RST,
@@ -217,6 +211,56 @@ async fn main(spawner: Spawner) {
         )
         .expect("spawn http2"));
     log::inf("httpd: port 80 listening");
+
+    // FTP :21 (3 sessions + 421 rejector, ftpd.c cap)
+    static FR1: static_cell::StaticCell<[u8; 1024]> = static_cell::StaticCell::new();
+    static FT1: static_cell::StaticCell<[u8; 1024]> = static_cell::StaticCell::new();
+    static FDR1: static_cell::StaticCell<[u8; 2048]> = static_cell::StaticCell::new();
+    static FDT1: static_cell::StaticCell<[u8; 2048]> = static_cell::StaticCell::new();
+    static FR2: static_cell::StaticCell<[u8; 1024]> = static_cell::StaticCell::new();
+    static FT2: static_cell::StaticCell<[u8; 1024]> = static_cell::StaticCell::new();
+    static FDR2: static_cell::StaticCell<[u8; 2048]> = static_cell::StaticCell::new();
+    static FDT2: static_cell::StaticCell<[u8; 2048]> = static_cell::StaticCell::new();
+    static FR3: static_cell::StaticCell<[u8; 1024]> = static_cell::StaticCell::new();
+    static FT3: static_cell::StaticCell<[u8; 1024]> = static_cell::StaticCell::new();
+    static FDR3: static_cell::StaticCell<[u8; 2048]> = static_cell::StaticCell::new();
+    static FDT3: static_cell::StaticCell<[u8; 2048]> = static_cell::StaticCell::new();
+    static FRJ: static_cell::StaticCell<[u8; 128]> = static_cell::StaticCell::new();
+    static FTJ: static_cell::StaticCell<[u8; 128]> = static_cell::StaticCell::new();
+    spawner
+        .spawn(ftpd::ftp_task(
+            *stack,
+            FR1.init([0u8; 1024]),
+            FT1.init([0u8; 1024]),
+            FDR1.init([0u8; 2048]),
+            FDT1.init([0u8; 2048]),
+        )
+        .expect("spawn ftp1"));
+    spawner
+        .spawn(ftpd::ftp_task(
+            *stack,
+            FR2.init([0u8; 1024]),
+            FT2.init([0u8; 1024]),
+            FDR2.init([0u8; 2048]),
+            FDT2.init([0u8; 2048]),
+        )
+        .expect("spawn ftp2"));
+    spawner
+        .spawn(ftpd::ftp_task(
+            *stack,
+            FR3.init([0u8; 1024]),
+            FT3.init([0u8; 1024]),
+            FDR3.init([0u8; 2048]),
+            FDT3.init([0u8; 2048]),
+        )
+        .expect("spawn ftp3"));
+    spawner
+        .spawn(ftpd::ftp_reject_task(
+            *stack,
+            FRJ.init([0u8; 128]),
+            FTJ.init([0u8; 128]),
+        ).expect("spawn ftprej"));
+    log::inf("ftp: port 21 listening");
 
     // Modbus RTU on USART2 + DE PA1 (baud/slave snapshot from cfg)
     spawner
@@ -323,16 +367,13 @@ fn panic(info: &core::panic::PanicInfo) -> ! {
             use core::fmt::Write as _;
             let _ = msg.write_fmt(format_args!("PANIC at {}", l));
             log::err(&msg);
-            defmt::error!("PANIC at {}:{}:{}", l.file(), l.line(), l.column());
         }
         None => {
             log::err("PANIC (no location)");
-            defmt::error!("PANIC (no location)");
         }
     }
     if let Some(p) = info.payload().downcast_ref::<&str>() {
         log::err(p);
-        defmt::error!("{}", p);
     }
     cortex_m::asm::udf()
 }
