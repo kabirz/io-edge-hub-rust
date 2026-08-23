@@ -190,6 +190,7 @@ async fn udp_task(stack: Stack<'static>) {
         }
 
         let mut rep = [0u8; 64];
+
         let rlen = critical_section::with(|_cs| {
             REGS.lock(|r| {
                 UDP_STATE.lock(|st| {

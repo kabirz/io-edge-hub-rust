@@ -29,8 +29,8 @@ pub static UDP_STATE: Mutex<CriticalSectionRawMutex, RefCell<UdpCfgState>> =
 pub static MB_SERVER: Mutex<CriticalSectionRawMutex, RefCell<MbServer>> =
     Mutex::new(RefCell::new(MbServer::new()));
 
-/// RegHooks bridging into real peripherals. DO GPIO wiring lands in M2;
-/// history/persistence hooks in M3.
+/// RegHooks bridging into real peripherals. DO GPIO wiring landed in M2;
+/// history/persistence land in M3 (queued to the storage task).
 pub struct Hooks;
 
 impl RegHooks for Hooks {
@@ -47,11 +47,20 @@ impl RegHooks for Hooks {
     }
 
     fn holding_save(&mut self) {
-        // M3: persist to config store on NOR
+        crate::storage::QUEUE.try_send(crate::storage::StorageCmd::CfgSave).ok();
+    }
+
+    fn history_enable_write(&mut self, en: bool) {
+        if !en {
+            // disable: close the file, keep the name for continuation
+            crate::storage::QUEUE
+                .try_send(crate::storage::StorageCmd::CloseKeepName)
+                .ok();
+        }
     }
 
     fn history_sync(&mut self) {
-        // M3: flush history file
+        crate::storage::QUEUE.try_send(crate::storage::StorageCmd::Sync).ok();
     }
 
     fn reboot_cold(&mut self) {
@@ -67,7 +76,8 @@ pub struct Cfg;
 
 impl CfgHooks for Cfg {
     fn config_erase_all(&mut self) {
-        // M3: erase config slots on NOR
-        crate::log::wrn("factory reset: config erase (no-op until M3)");
+        crate::storage::QUEUE
+            .try_send(crate::storage::StorageCmd::CfgEraseAll)
+            .ok();
     }
 }

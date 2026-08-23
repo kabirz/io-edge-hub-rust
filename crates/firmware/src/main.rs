@@ -10,7 +10,9 @@ mod net;
 mod reboot;
 mod rtu;
 mod sampling;
+mod storage;
 mod systime;
+mod w25q;
 
 use embassy_executor::Spawner;
 use embassy_stm32::gpio::{Level, Output, Speed};
@@ -118,7 +120,26 @@ async fn main(spawner: Spawner) {
     systime::init(rtc, &tp);
     defmt::info!("post-systime");
 
-    // heartbeat: LED PE7, IWDG 30s fed every 3s, 1Hz epoch, delayed reboot
+    // W25Q128 NOR on SPI1 (PA5/6/7, CS PA4): config store + littlefs.
+    // Config loads synchronously before net bring-up (IP comes from cfg);
+    // the chip is then owned by the storage task in an interrupt executor
+    // so NOR busy-polls never stall network/Modbus for more than one
+    // flash operation.
+    let nor = w25q::W25q::new(w25q::W25qPins {
+        spi1: dp.SPI1,
+        sck: dp.PA5,
+        miso: dp.PA6,
+        mosi: dp.PA7,
+        cs: dp.PA4,
+    });
+    critical_section::with(|_cs| {
+        crate::storage::NOR.lock(|r| *r.borrow_mut() = nor);
+    });
+    crate::storage::boot_config_load();
+
+    spawner.spawn(crate::storage::storage_task().expect("spawn storage"));
+
+    // heartbeat: LED PE7, IWDG 30s fed every 3s, delayed reboot
     // (spawned after net setup: netmon needs the stack handle)
     let led = Output::new(dp.PE7, Level::High, Speed::Low);
     let wdt = IndependentWatchdog::new(dp.IWDG, 30_000_000);

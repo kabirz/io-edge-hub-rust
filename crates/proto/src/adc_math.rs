@@ -16,17 +16,21 @@ mod tests {
 
     #[test]
     fn full_scale() {
-        // raw 4095 -> ~3300mV -> 4-20mA ch: 7414*3299/10000 = 2446 (0.01mA)
-        assert_eq!(ai_convert(0, 4095), 2446);
-        // 0-10V ch: 3704*3299/10000 = 1222 (0.01V)
-        assert_eq!(ai_convert(2, 4095), 1222);
+        // C goldens (test_adc_math.c): 4095*3300/4096 = 3299 mV first step
+        assert_eq!(ai_convert(0, 4095), 2445);
+        assert_eq!(ai_convert(1, 4095), 2445);
+        assert_eq!(ai_convert(2, 4095), 1221);
+        assert_eq!(ai_convert(3, 4095), 1221);
     }
 
     #[test]
     fn zero_and_mid() {
         assert_eq!(ai_convert(0, 0), 0);
         assert_eq!(ai_convert(3, 0), 0);
-        // raw 2048 -> 2048*3300/4096 = 1650mV
-        assert_eq!(ai_convert(0, 2048), 7414 * 1650 / 10000);
+        // raw 2048 -> 1650 mV -> 7414*1650/10000 = 1223 (0.01mA)
+        assert_eq!(ai_convert(0, 2048), 1223);
+        assert_eq!(ai_convert(2, 2048), 611);
+        assert_eq!(ai_convert(0, 1), 0);
+        assert_eq!(ai_convert(3, 1), 0);
     }
 }

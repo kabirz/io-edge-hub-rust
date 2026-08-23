@@ -8,12 +8,19 @@ use embassy_stm32::gpio::{AnyPin, Input, Pull};
 use embassy_time::{Duration, Timer};
 
 use io_edge_hub_proto::adc_math::ai_convert;
+use io_edge_hub_proto::history::HisData;
 use io_edge_hub_proto::regmap::{
     HOLDING_AI_ENABLE_IDX, HOLDING_AI_SAMPLE_MS_IDX, HOLDING_DI_ENABLE_IDX,
     HOLDING_DI_SAMPLE_MS_IDX, INPUT_AI0_IDX, INPUT_DI_IDX,
 };
 
 use crate::appstate::REGS;
+use crate::storage::{QUEUE, StorageCmd};
+
+/// Queue a history record (send_history_data: full queue drops silently).
+fn send_history_data(d: HisData) {
+    QUEUE.try_send(StorageCmd::Write(d)).ok();
+}
 
 const SAMPLE_INTERVAL_MAX: u64 = 5000;
 
@@ -49,7 +56,10 @@ pub async fn di_task(pins: DiPins) {
                 r.borrow_mut().update_input(INPUT_DI_IDX as u16, val).ok();
             });
         });
-        // M3: history record (DI_TYPE)
+        // history record (dio.c: queued when any DI channel is enabled)
+        if en != 0 {
+            send_history_data(HisData::di(crate::systime::now_epoch(), en, val));
+        }
         Timer::after(Duration::from_millis(clamp_interval(si))).await;
     }
 }
@@ -90,7 +100,21 @@ pub async fn ai_task(p: AdcPins) {
         sample!(c1, 1);
         sample!(c2, 2);
         sample!(c3, 3);
-        // M3: history record (AI_TYPE)
+        // history record (adc.c: queued when any AI channel is enabled)
+        if en & 0x000F != 0 {
+            let values = critical_section::with(|_cs| {
+                REGS.lock(|r| {
+                    let rb = r.borrow();
+                    [
+                        rb.get_input(INPUT_AI0_IDX as u16),
+                        rb.get_input((INPUT_AI0_IDX + 1) as u16),
+                        rb.get_input((INPUT_AI0_IDX + 2) as u16),
+                        rb.get_input((INPUT_AI0_IDX + 3) as u16),
+                    ]
+                })
+            });
+            send_history_data(HisData::ai(crate::systime::now_epoch(), en & 0x000F, values));
+        }
         Timer::after(Duration::from_millis(clamp_interval(si))).await;
     }
 }

@@ -11,7 +11,7 @@ cortex-m-rt = { version = "0.7.5", features = ["device"] }
 panic-halt = "0.2.0"
 
 embassy-stm32 = { version = "0.6.0", features = ["stm32f407ve", "time-driver-any", "exti"] }
-embassy-executor = { version = "0.10.0", features = ["platform-cortex-m", "executor-thread"] }
+embassy-executor = { version = "0.10.0", features = ["platform-cortex-m", "executor-thread", "executor-interrupt"] }
 embassy-time = "0.5.0"
 embassy-sync = "0.8.0"
 embassy-futures = "0.1.1"
@@ -22,6 +22,7 @@ embassy-net-driver-channel = "0.4.0"
 embassy-net-wiznet = "0.3.0"
 static_cell = "2"
 littlefs2 = { version = "0.8", features = ["c-stubs"] }
+generic-array = "0.14"
 
 embedded-io = "0.6.1"
 embedded-io-async = "0.7.0"

@@ -740,6 +740,7 @@ dependencies = [
  "embedded-hal 1.0.0",
  "embedded-io 0.6.1",
  "embedded-io-async 0.7.0",
+ "generic-array",
  "heapless 0.8.0",
  "io-edge-hub-proto",
  "littlefs2",
