@@ -5,6 +5,7 @@ use core::cell::RefCell;
 use embassy_sync::blocking_mutex::Mutex;
 use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
 
+use io_edge_hub_proto::mb_server::MbServer;
 use io_edge_hub_proto::regmap::{RegHooks, RegMap};
 use io_edge_hub_proto::udp_cfg::{CfgHooks, UdpCfgState};
 
@@ -23,6 +24,10 @@ pub static REGS: Mutex<CriticalSectionRawMutex, RefCell<RegMap>> =
 
 pub static UDP_STATE: Mutex<CriticalSectionRawMutex, RefCell<UdpCfgState>> =
     Mutex::new(RefCell::new(UdpCfgState::new()));
+
+/// Shared PDU server (global diagnostics, like mb_server.c's static counters).
+pub static MB_SERVER: Mutex<CriticalSectionRawMutex, RefCell<MbServer>> =
+    Mutex::new(RefCell::new(MbServer::new()));
 
 /// RegHooks bridging into real peripherals. DO GPIO wiring lands in M2;
 /// history/persistence hooks in M3.

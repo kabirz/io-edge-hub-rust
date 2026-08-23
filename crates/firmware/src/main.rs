@@ -1,11 +1,15 @@
-#![no_std]
+﻿#![no_std]
 #![no_main]
+use defmt_rtt as _;
 
 mod appstate;
 mod io_gpio;
 mod log;
+mod mbtcp;
 mod net;
 mod reboot;
+mod rtu;
+mod sampling;
 mod systime;
 
 use embassy_executor::Spawner;
@@ -43,15 +47,29 @@ fn board_config() -> BoardConfig {
 #[embassy_executor::main]
 async fn main(spawner: Spawner) {
     // boot_jump_vec() leaves PRIMASK set (__disable_irq before the jump) and
-    // cortex-m-rt never clears it; without this every IRQ stays masked and
-    // all embassy timers/SPI-DMA/EXTI wait forever.
-    unsafe { cortex_m::interrupt::enable(); }
-    // belt-and-braces: make sure VTOR points at our table (the loader already
-    // sets it; kept for independence from loader behavior)
+    // cortex-m-rt never clears it. Before unmasking we must also kill any
+    // interrupts the bootloader left pending/enabled: its jump only clears
+    // NVIC ICPR[0], so a pending IRQ whose vector our table binds to
+    // DefaultHandler (e.g. EXTI9_5 from DI pin activity) would trap the core
+    // in the default handler loop the moment interrupts open.
     unsafe {
         core::ptr::write_volatile(0xE000_ED08 as *mut u32, 0x0801_0200); // SCB.VTOR
+        for i in 0..3usize {
+            core::ptr::write_volatile((0xE000_E180 + 4 * i) as *mut u32, 0xFFFF_FFFF); // ICER: disable all
+            core::ptr::write_volatile((0xE000_E280 + 4 * i) as *mut u32, 0xFFFF_FFFF); // ICPR: clear pending
+        }
+        // wipe leftover EXTI configuration from the loader: triggers + mask + pending
+        core::ptr::write_volatile(0x4001_3C08 as *mut u32, 0x0); // RTSR
+        core::ptr::write_volatile(0x4001_3C0C as *mut u32, 0x0); // FTSR
+        core::ptr::write_volatile(0x4001_3C00 as *mut u32, 0x0); // IMR
+        core::ptr::write_volatile(0x4001_3C14 as *mut u32, 0xFFFF_FFFF); // PR: clear all
+        for _ in 0..100 {
+            cortex_m::asm::nop();
+        }
+        cortex_m::interrupt::enable();
     }
     let dp = embassy_stm32::init(board_config());
+    defmt::info!("post-init");
 
     // USART1 console: PA9 TX / PA10 RX @115200 (same as C firmware)
     let uart = Uart::new_blocking(dp.USART1, dp.PA10, dp.PA9, UartConfig::default())
@@ -66,6 +84,7 @@ async fn main(spawner: Spawner) {
         .write_fmt(format_args!("io-edge-hub rust {} boot", appstate::version::FW_VERSION))
         .ok();
     log::inf(&banner);
+    defmt::info!("banner");
 
     // DO8 on PD7-PD14, LED8 mirror on PE8-PE15 (idle low)
     io_gpio::init(
@@ -91,15 +110,21 @@ async fn main(spawner: Spawner) {
         ],
     );
 
+    defmt::info!("post-gpio");
+
     // RTC-backed system time (VBAT persistent)
     let (rtc, tp) = Rtc::new(dp.RTC, RtcConfig::default());
+    defmt::info!("post-rtc-new");
     systime::init(rtc, &tp);
+    defmt::info!("post-systime");
 
     // heartbeat: LED PE7, IWDG 30s fed every 3s, 1Hz epoch, delayed reboot
+    // (spawned after net setup: netmon needs the stack handle)
     let led = Output::new(dp.PE7, Level::High, Speed::Low);
     let wdt = IndependentWatchdog::new(dp.IWDG, 30_000_000);
-    spawner.spawn(heartbeat(wdt, led).expect("spawn heartbeat"));    // W5500 MACRAW + embassy-net + UDP :8600
-    net::setup(
+
+    // W5500 MACRAW + embassy-net + UDP :8600
+    let stack = net::setup(
         &spawner,
         net::NetPins {
             spi2: dp.SPI2,
@@ -115,10 +140,84 @@ async fn main(spawner: Spawner) {
     )
     .await;
     log::inf("net: W5500 up, udp 8600");
+    defmt::info!("net: setup complete, spawning tasks");
+    spawner.spawn(heartbeat(wdt, led, *stack).expect("spawn hb"));
+
+    // Modbus TCP :502: 2 serving sockets (3rd client finds no listener -> RST,
+    // same cap as the C firmware); per-instance buffers from distinct statics
+    static MB_RX1: static_cell::StaticCell<[u8; 512]> = static_cell::StaticCell::new();
+    static MB_TX1: static_cell::StaticCell<[u8; 512]> = static_cell::StaticCell::new();
+    static MB_RX2: static_cell::StaticCell<[u8; 512]> = static_cell::StaticCell::new();
+    static MB_TX2: static_cell::StaticCell<[u8; 512]> = static_cell::StaticCell::new();
+    spawner
+        .spawn(mbtcp::conn_task(
+            *stack,
+            MB_RX1.init([0u8; 512]),
+            MB_TX1.init([0u8; 512]),
+        )
+        .expect("spawn mbtcp1"));
+    spawner
+        .spawn(mbtcp::conn_task(
+            *stack,
+            MB_RX2.init([0u8; 512]),
+            MB_TX2.init([0u8; 512]),
+        )
+        .expect("spawn mbtcp2"));
+    log::inf("mbtcp: port 502 listening");
+
+    // Modbus RTU on USART2 + DE PA1 (baud/slave snapshot from cfg)
+    spawner
+        .spawn(rtu::rtu_task(rtu::RtuPins {
+            usart2: dp.USART2,
+            rx: dp.PA3,
+            tx: dp.PA2,
+            de: dp.PA1,
+            tx_dma: dp.DMA1_CH6,
+            rx_dma: dp.DMA1_CH5,
+        })
+        .expect("spawn rtu"));
+
+    // DI16 sampling (channel order = dio.c di_pins, pull-down active-high)
+    spawner
+        .spawn(sampling::di_task(sampling::DiPins([
+            dp.PD3.into(),
+            dp.PD4.into(),
+            dp.PD5.into(),
+            dp.PD6.into(),
+            dp.PB5.into(),
+            dp.PB6.into(),
+            dp.PB7.into(),
+            dp.PB8.into(),
+            dp.PB9.into(),
+            dp.PB10.into(),
+            dp.PB11.into(),
+            dp.PD2.into(),
+            dp.PB0.into(),
+            dp.PB1.into(),
+            dp.PB3.into(),
+            dp.PB4.into(),
+        ]))
+        .expect("spawn di"));
+
+    // AI4 sampling on ADC1 IN10-13 = PC0-PC3
+    spawner
+        .spawn(sampling::ai_task(sampling::AdcPins {
+            adc1: dp.ADC1,
+            ch0: dp.PC0,
+            ch1: dp.PC1,
+            ch2: dp.PC2,
+            ch3: dp.PC3,
+        })
+        .expect("spawn ai"));
+    log::inf("io: DI16/AI4 sampling, rtu up");
 }
 
 #[embassy_executor::task]
-async fn heartbeat(mut wdt: IndependentWatchdog<'static, embassy_stm32::peripherals::IWDG>, mut led: Output<'static>) {
+async fn heartbeat(
+    mut wdt: IndependentWatchdog<'static, embassy_stm32::peripherals::IWDG>,
+    mut led: Output<'static>,
+    stack: embassy_net::Stack<'static>,
+) {
     wdt.unleash();
     let mut ticker = Ticker::every(Duration::from_millis(100));
     let mut ticks: u32 = 0;
@@ -143,6 +242,14 @@ async fn heartbeat(mut wdt: IndependentWatchdog<'static, embassy_stm32::peripher
         if ticks % 30 == 0 {
             wdt.pet();
         }
+        // netmon: 500ms link poll; link down -> DO all off (w5500.c net_mon)
+        if ticks % 5 == 0 && !stack.is_link_up() {
+            critical_section::with(|_cs| {
+                crate::appstate::REGS
+                    .lock(|r| r.borrow_mut().holding[io_edge_hub_proto::regmap::HOLDING_DO_IDX] = 0);
+            });
+            io_gpio::set_do_led(0);
+        }
         // heartbeat LED: 300ms on / 2700ms off (same as the C firmware)
         led.set_level(if ticks % 30 < 3 { Level::High } else { Level::Low });
     }
@@ -150,9 +257,23 @@ async fn heartbeat(mut wdt: IndependentWatchdog<'static, embassy_stm32::peripher
 
 #[panic_handler]
 fn panic(info: &core::panic::PanicInfo) -> ! {
-    let mut msg = heapless::String::<96>::new();
-    use core::fmt::Write as _;
-    let _ = msg.write_fmt(format_args!("PANIC {}", info));
-    log::err(&msg);
+    // location and payload logged separately: each fits the line buffer
+    match info.location() {
+        Some(l) => {
+            let mut msg = heapless::String::<160>::new();
+            use core::fmt::Write as _;
+            let _ = msg.write_fmt(format_args!("PANIC at {}", l));
+            log::err(&msg);
+            defmt::error!("PANIC at {}:{}:{}", l.file(), l.line(), l.column());
+        }
+        None => {
+            log::err("PANIC (no location)");
+            defmt::error!("PANIC (no location)");
+        }
+    }
+    if let Some(p) = info.payload().downcast_ref::<&str>() {
+        log::err(p);
+        defmt::error!("{}", p);
+    }
     cortex_m::asm::udf()
 }

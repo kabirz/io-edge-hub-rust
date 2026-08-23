@@ -42,5 +42,6 @@ fn main() {
     )
     .unwrap();
     println!("cargo:rerun-if-changed={}", root.join("VERSION").display());
+    println!("cargo:rerun-if-changed={}", root.join(".git").join("HEAD").display());
     println!("cargo:rerun-if-env-changed=FW_GIT_DIR");
 }

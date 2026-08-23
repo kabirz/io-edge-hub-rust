@@ -80,6 +80,7 @@ pub async fn setup(spawner: &embassy_executor::Spawner, p: NetPins) -> &'static 
     static STATE: StaticCell<embassy_net_wiznet::State<4, 4>> = StaticCell::new();
     let state = STATE.init(embassy_net_wiznet::State::new());
     crate::log::inf("net: spi up, w5500 init");
+    defmt::info!("net: spi up, entering w5500 init");
     let (device, runner) = match embassy_net_wiznet::new::<_, _, embassy_net_wiznet::chip::W5500, _, _, _>(
         derive_mac_from_uid(),
         state,
@@ -98,6 +99,7 @@ pub async fn setup(spawner: &embassy_executor::Spawner, p: NetPins) -> &'static 
         }
     };
     crate::log::inf("net: w5500 chip ok");
+    defmt::info!("net: w5500 chip ok");
 
     let ip = critical_section::with(|_cs| {
         REGS.lock(|r| {
