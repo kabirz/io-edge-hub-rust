@@ -1,6 +1,9 @@
 [workspace]
 resolver = "2"
-members = ["crates/proto", "crates/firmware"]
+members = ["crates/proto", "crates/firmware", "crates/littlefs2-sys"]
+
+[patch.crates-io]
+littlefs2-sys = { path = "crates/littlefs2-sys" }
 
 [workspace.package]
 version = "0.3.0"

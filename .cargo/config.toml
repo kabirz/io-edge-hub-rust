@@ -1,5 +1,9 @@
 [build]
 target = "thumbv7em-none-eabihf"
 
+[env]
+CC_thumbv7em_none_eabihf = "C:\\Program Files (x86)\\Arm GNU Toolchain arm-none-eabi\\14.3 rel1\\bin\\arm-none-eabi-gcc.exe"
+AR_thumbv7em_none_eabihf = "C:\\Program Files (x86)\\Arm GNU Toolchain arm-none-eabi\\14.3 rel1\\bin\\arm-none-eabi-ar.exe"
+
 [target.'cfg(all(target_arch = "arm", target_os = "none"))']
 rustflags = ["-C", "link-arg=-Tlink.x", "-C", "link-arg=-Tdefmt.x"]

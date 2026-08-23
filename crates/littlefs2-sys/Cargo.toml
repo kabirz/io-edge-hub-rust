@@ -1,0 +1,18 @@
+[package]
+edition = "2018"
+name = "littlefs2-sys"
+version = "0.4.0"
+description = "Vendored low-level bindings to littlefs (hand-written, no bindgen)"
+license = "BSD-3-Clause"
+
+build = "build.rs"
+
+[features]
+default = []
+assertions = []
+malloc = []
+multiversion = []
+trace = []
+
+[build-dependencies]
+cc = "1"
