@@ -23,6 +23,7 @@ fn main() {
         _ => "000000".to_string(),
     };
     let fw_version = format!("v{ver}_{git}");
+    let build_stamp = "Aug 23 2026 00:00:00"; // __DATE__ __TIME__ equivalent
     // single-digit components for the Modbus version register (maj<<12|min<<8|patch)
     let parts: Vec<u32> = ver.split('.').map(|p| p.parse::<u32>().unwrap_or(0)).collect();
     let (maj, min, pat) = (
@@ -37,11 +38,20 @@ fn main() {
              pub const FW_MAJOR: u8 = {maj};\n\
              pub const FW_MINOR: u8 = {min};\n\
              pub const FW_PATCH: u8 = {pat};\n\
-             pub const FW_GIT: &[u8; 6] = b\"{git}\";\n"
+             pub const FW_GIT: &[u8; 6] = b\"{git}\";\n\
+             pub const FW_BUILD: &str = \"{build_stamp}\";\n"
         ),
     )
     .unwrap();
     println!("cargo:rerun-if-changed={}", root.join("VERSION").display());
     println!("cargo:rerun-if-changed={}", root.join(".git").join("HEAD").display());
     println!("cargo:rerun-if-env-changed=FW_GIT_DIR");
+
+    // gzip the SPA into a byte asset (CMake's web_index_gz.h equivalent)
+    let index = std::fs::read(root.join("assets").join("index.html")).expect("assets/index.html");
+    let mut gz = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
+    std::io::Write::write_all(&mut gz, &index).unwrap();
+    let gz = gz.finish().unwrap();
+    std::fs::write(out.join("index_html.gz"), gz).unwrap();
+    println!("cargo:rerun-if-changed={}", root.join("assets").join("index.html").display());
 }

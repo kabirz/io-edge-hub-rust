@@ -3,7 +3,11 @@
 
 use embassy_net::udp::{PacketMetadata, UdpSocket};
 use embassy_net::{IpAddress, IpEndpoint, Ipv4Address, Stack, StaticConfigV4};
+use core::cell::RefCell;
+
 use embassy_stm32::Peri;
+use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
+use embassy_sync::blocking_mutex::Mutex;
 use embassy_stm32::bind_interrupts;
 use embassy_stm32::dma;
 use embassy_stm32::exti::{ExtiInput, InterruptHandler as ExtiIrqHandler};
@@ -53,6 +57,27 @@ pub fn derive_mac_from_uid() -> [u8; 6] {
     ]
 }
 
+// accessors for the web info JSON (httpd.c reads these via w5500_macraw_)
+pub static CUR_MAC: Mutex<CriticalSectionRawMutex, RefCell<[u8; 6]>> =
+    Mutex::new(RefCell::new([0; 6]));
+
+pub fn current_mac() -> [u8; 6] {
+    critical_section::with(|_cs| CUR_MAC.lock(|m| {
+        let g = m.borrow();
+        let v: [u8; 6] = *g;
+        v
+    }))
+}
+
+/// Link status refreshed by the heartbeat netmon poll (link-up boolean only;
+/// Stack itself is not Sync so it cannot live in a static).
+pub static LINK_UP: Mutex<CriticalSectionRawMutex, RefCell<bool>> =
+    Mutex::new(RefCell::new(false));
+
+pub fn net_link_up() -> bool {
+    critical_section::with(|_cs| LINK_UP.lock(|b| *b.borrow()))
+}
+
 pub struct NetPins {
     pub spi2: Peri<'static, peripherals::SPI2>,
     pub sck: Peri<'static, peripherals::PB13>,
@@ -81,8 +106,9 @@ pub async fn setup(spawner: &embassy_executor::Spawner, p: NetPins) -> &'static 
     let state = STATE.init(embassy_net_wiznet::State::new());
     crate::log::inf("net: spi up, w5500 init");
     defmt::info!("net: spi up, entering w5500 init");
+    let mac = derive_mac_from_uid();
     let (device, runner) = match embassy_net_wiznet::new::<_, _, embassy_net_wiznet::chip::W5500, _, _, _>(
-        derive_mac_from_uid(),
+        mac,
         state,
         spi_dev,
         int,
@@ -127,6 +153,9 @@ pub async fn setup(spawner: &embassy_executor::Spawner, p: NetPins) -> &'static 
         0x6A9C_B400,
     );
     let stack: &'static Stack<'static> = STACK.init(stack);
+    critical_section::with(|_cs| {
+        CUR_MAC.lock(|m| *m.borrow_mut() = mac);
+    });
     crate::log::inf("net: stack created");
 
     spawner.spawn(net_run_task(runner).expect("spawn w5500"));

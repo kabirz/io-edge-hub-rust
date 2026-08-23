@@ -3,6 +3,7 @@
 use defmt_rtt as _;
 
 mod appstate;
+mod httpd;
 mod io_gpio;
 mod log;
 mod mbtcp;
@@ -184,7 +185,38 @@ async fn main(spawner: Spawner) {
             MB_TX2.init([0u8; 512]),
         )
         .expect("spawn mbtcp2"));
+    // 3rd listener accepts-then-aborts the excess master (tcp.c behavior)
+    static RJ_RX: static_cell::StaticCell<[u8; 64]> = static_cell::StaticCell::new();
+    static RJ_TX: static_cell::StaticCell<[u8; 64]> = static_cell::StaticCell::new();
+    spawner
+        .spawn(mbtcp::reject_task(
+            *stack,
+            RJ_RX.init([0u8; 64]),
+            RJ_TX.init([0u8; 64]),
+        )
+        .expect("spawn mbreject"));
     log::inf("mbtcp: port 502 listening");
+
+    // HTTP :80 (2 connections, httpd.c cap); per-instance socket buffers
+    static HTTP_RX1: static_cell::StaticCell<[u8; 640]> = static_cell::StaticCell::new();
+    static HTTP_TX1: static_cell::StaticCell<[u8; 2048]> = static_cell::StaticCell::new();
+    static HTTP_RX2: static_cell::StaticCell<[u8; 640]> = static_cell::StaticCell::new();
+    static HTTP_TX2: static_cell::StaticCell<[u8; 2048]> = static_cell::StaticCell::new();
+    spawner
+        .spawn(httpd::http_task(
+            *stack,
+            HTTP_RX1.init([0u8; 640]),
+            HTTP_TX1.init([0u8; 2048]),
+        )
+        .expect("spawn http1"));
+    spawner
+        .spawn(httpd::http_task(
+            *stack,
+            HTTP_RX2.init([0u8; 640]),
+            HTTP_TX2.init([0u8; 2048]),
+        )
+        .expect("spawn http2"));
+    log::inf("httpd: port 80 listening");
 
     // Modbus RTU on USART2 + DE PA1 (baud/slave snapshot from cfg)
     spawner
@@ -249,7 +281,8 @@ async fn heartbeat(
             log::inf("hb: ticking");
         }
 
-        // delayed reboot poll (100ms granularity)
+        // delayed reboot poll (100ms granularity): web/UDP-triggered
+        appstate::reboot_due();
         if reboot::due() {
             log::wrn("reboot: system reset");
             reboot::system_reset();
@@ -264,12 +297,17 @@ async fn heartbeat(
             wdt.pet();
         }
         // netmon: 500ms link poll; link down -> DO all off (w5500.c net_mon)
-        if ticks % 5 == 0 && !stack.is_link_up() {
-            critical_section::with(|_cs| {
-                crate::appstate::REGS
-                    .lock(|r| r.borrow_mut().holding[io_edge_hub_proto::regmap::HOLDING_DO_IDX] = 0);
-            });
-            io_gpio::set_do_led(0);
+        if ticks % 5 == 0 {
+            let up = stack.is_link_up();
+            critical_section::with(|_cs| crate::net::LINK_UP.lock(|b| *b.borrow_mut() = up));
+            if !up {
+                critical_section::with(|_cs| {
+                    crate::appstate::REGS.lock(|r| {
+                        r.borrow_mut().holding[io_edge_hub_proto::regmap::HOLDING_DO_IDX] = 0
+                    });
+                });
+                io_gpio::set_do_led(0);
+            }
         }
         // heartbeat LED: 300ms on / 2700ms off (same as the C firmware)
         led.set_level(if ticks % 30 < 3 { Level::High } else { Level::Low });

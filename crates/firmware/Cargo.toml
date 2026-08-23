@@ -31,3 +31,6 @@ heapless = "0.8.0"
 
 defmt = "1.1"
 defmt-rtt = "0.4"
+
+[build-dependencies]
+flate2 = "1"

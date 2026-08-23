@@ -29,6 +29,39 @@ pub static UDP_STATE: Mutex<CriticalSectionRawMutex, RefCell<UdpCfgState>> =
 pub static MB_SERVER: Mutex<CriticalSectionRawMutex, RefCell<MbServer>> =
     Mutex::new(RefCell::new(MbServer::new()));
 
+/// Delayed-reboot request (set_reboot_status): reboot a moment after the
+/// triggering response reaches the wire; executed by the heartbeat task.
+static REBOOT_AT: Mutex<CriticalSectionRawMutex, RefCell<Option<u64>>> =
+    Mutex::new(RefCell::new(None));
+
+pub fn set_reboot_status(on: bool) {
+    let v = if on { Some(embassy_time::Instant::now().as_millis() as u64 + 250) } else { None };
+    critical_section::with(|_cs| {
+        REBOOT_AT.lock(|r| *r.borrow_mut() = v);
+    });
+}
+
+/// Called from the heartbeat loop; performs the pending delayed reboot.
+pub fn reboot_due() {
+    let now = embassy_time::Instant::now().as_millis() as u64;
+    let due = critical_section::with(|_cs| {
+        REBOOT_AT.lock(|r| {
+            let mut g = r.borrow_mut();
+            match *g {
+                Some(t) if now >= t => {
+                    *g = None;
+                    true
+                }
+                _ => false,
+            }
+        })
+    });
+    if due {
+        crate::log::wrn("delayed reboot");
+        reboot::cold();
+    }
+}
+
 /// RegHooks bridging into real peripherals. DO GPIO wiring landed in M2;
 /// history/persistence land in M3 (queued to the storage task).
 pub struct Hooks;

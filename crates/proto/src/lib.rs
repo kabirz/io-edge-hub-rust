@@ -11,3 +11,4 @@ pub mod regmap;
 pub mod rtu_frame;
 pub mod time_math;
 pub mod udp_cfg;
+pub mod web_json;

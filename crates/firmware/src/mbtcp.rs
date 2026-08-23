@@ -16,6 +16,9 @@ pub const MBTCP_PORT: u16 = 502;
 /// One serving socket: accept -> serve until closed -> accept again.
 /// Buffers come in as task args: two instances must not share in-body statics
 /// (StaticCell double-init panics). pool_size = 2: two concurrent masters.
+/// Occupied serving slots (0..2); gates the rejector listener.
+pub static BUSY: core::sync::atomic::AtomicU8 = core::sync::atomic::AtomicU8::new(0);
+
 #[embassy_executor::task(pool_size = 2)]
 pub async fn conn_task(stack: Stack<'static>, rx_buf: &'static mut [u8; 512], tx_buf: &'static mut [u8; 512]) {
     let mut sock = TcpSocket::new(stack, rx_buf, tx_buf);
@@ -26,12 +29,33 @@ pub async fn conn_task(stack: Stack<'static>, rx_buf: &'static mut [u8; 512], tx
             Timer::after_millis(100).await;
             continue;
         }
+        BUSY.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
         serve(&mut sock).await;
+        BUSY.fetch_sub(1, core::sync::atomic::Ordering::Relaxed);
         // hard reset: instant Closed -> instantly reusable for the next
         // accept (graceful close lingers in FIN/TIME_WAIT states and leaves
         // the port without a listener)
         sock.abort();
         Timer::after_millis(10).await;
+    }
+}
+
+/// Third listener: accepts the excess connection then immediately aborts it
+/// (tcp.c accepts-then-aborts when no serving slot is free — the client's
+/// connect() succeeds and its request dies with a reset).
+#[embassy_executor::task]
+pub async fn reject_task(stack: Stack<'static>, rx_buf: &'static mut [u8; 64], tx_buf: &'static mut [u8; 64]) {
+    let mut sock = TcpSocket::new(stack, rx_buf, tx_buf);
+    sock.set_timeout(Some(Duration::from_secs(5)));
+    loop {
+        // Only listen while both serving slots are busy: a free server must
+        // win the SYN dispatch, so this socket stays out of LISTEN otherwise
+        if BUSY.load(core::sync::atomic::Ordering::Relaxed) >= 2 {
+            if sock.accept(MBTCP_PORT).await.is_ok() {
+                sock.abort();
+            }
+        }
+        Timer::after_millis(5).await;
     }
 }
 
