@@ -175,14 +175,17 @@ async fn net_stack_task(mut runner: embassy_net::Runner<'static, embassy_net_dri
 
 #[embassy_executor::task]
 async fn udp_task(stack: Stack<'static>) {
-    static RX_META: StaticCell<[PacketMetadata; 8]> = StaticCell::new();
+    static RX_META: StaticCell<[PacketMetadata; 16]> = StaticCell::new();
     static TX_META: StaticCell<[PacketMetadata; 8]> = StaticCell::new();
-    static RX_BUF: StaticCell<[u8; 2048]> = StaticCell::new();
+    // V2 upgrade bursts arrive faster than they are written to NOR: a full
+    // 8x1400 B window must fit. 16 K in CCRAM keeps the main-stack headroom.
+    #[link_section = ".ccm.bss"]
+    static RX_BUF: StaticCell<[u8; 16384]> = StaticCell::new();
     static TX_BUF: StaticCell<[u8; 2048]> = StaticCell::new();
     let mut sock = UdpSocket::new(
         stack,
-        RX_META.init([PacketMetadata::EMPTY; 8]),
-        RX_BUF.init([0u8; 2048]),
+        RX_META.init([PacketMetadata::EMPTY; 16]),
+        RX_BUF.init([0u8; 16384]),
         TX_META.init([PacketMetadata::EMPTY; 8]),
         TX_BUF.init([0u8; 2048]),
     );
@@ -214,6 +217,29 @@ async fn udp_task(stack: Stack<'static>) {
         let same = same_subnet24(&meta.endpoint.addr);
         if !same && !udp_cmd_bcast_allowed(cmd) {
             crate::log::wrn("udp: drop cross-subnet cmd");
+            continue;
+        }
+
+        // debug: cmd 0xFB dumps fw upgrade diagnostics (finish failure cause)
+        if cmd == 0xFB {
+            let d = critical_section::with(|_cs| crate::fw::FW_DBG.lock(|f| *f.borrow()));
+            let mut rep = [0u8; 65];
+            rep[0] = 0xFB;
+            for (i, v) in d.iter().enumerate() {
+                rep[1 + i * 4..5 + i * 4].copy_from_slice(&v.to_le_bytes());
+            }
+            sock.send_to(&rep, meta.endpoint).await.ok();
+            continue;
+        }
+
+        // firmware-upgrade channel (fw_udp.c): 0x01/0x02/0x03/0x06.
+        // Synchronous here like the C worker's effect on timing: START's
+        // whole-slot erase (~1s) delays its reply, DATA_V2 page writes are
+        // millisecond-scale; the net stack keeps polling meanwhile.
+        if let Some((rep, rlen)) = fw_udp_cmd(cmd, &rx[1..n]).await {
+            if rlen > 0 {
+                sock.send_to(&rep[..rlen], meta.endpoint).await.ok();
+            }
             continue;
         }
 
@@ -290,8 +316,101 @@ async fn udp_task(stack: Stack<'static>) {
             critical_section::with(|_cs| UDP_STATE.lock(|st| st.borrow_mut().take_reboot_pending()));
         if reboot_now {
             crate::log::wrn("udp: delayed reboot");
+            // flush history before the swap reboot (history_sync in udp_task.c)
+            crate::storage::QUEUE
+                .try_send(crate::storage::StorageCmd::Sync)
+                .ok();
             crate::reboot::cold();
         }
+    }
+}
+
+/// fw_udp.c command handlers; returns (reply, len) when the command was a
+/// firmware-channel one (None -> not ours, generic layer takes it).
+async fn fw_udp_cmd(cmd: u8, payload: &[u8]) -> Option<([u8; 8], usize)> {
+    match cmd {
+        // START [size LE32][keyhash 32B?] -> [01][status][v2_chunk LE16]
+        0x01 => {
+            if payload.len() < 4 {
+                return Some(([0; 8], 0)); // malformed: silent like the C gate
+            }
+            let total = u32::from_le_bytes([payload[0], payload[1], payload[2], payload[3]]);
+            let kh: Option<&[u8; 32]> = if payload.len() >= 4 + 32 {
+                match payload[4..36].try_into() {
+                    Ok(k) => Some(k),
+                    Err(_) => None,
+                }
+            } else {
+                None
+            };
+            let rc = crate::fw::start(total, kh);
+            crate::log::inf("fwupg: start");
+            let mut rep = [0u8; 8];
+            rep[0] = 0x01;
+            rep[1] = match rc {
+                0 => 1,
+                -2 => 2,
+                _ => 0,
+            };
+            rep[2] = (1400u16 & 0xFF) as u8;
+            rep[3] = ((1400u16 >> 8) & 0xFF) as u8;
+            Some((rep, 4))
+        }
+        // DATA [data<=511] -> [02][received LE32]
+        0x02 => {
+            if payload.len() > 511 {
+                return Some(([0; 8], 0));
+            }
+            crate::fw::write(payload);
+            let mut rep = [0u8; 8];
+            rep[0] = 0x02;
+            rep[1..5].copy_from_slice(&crate::fw::received().to_le_bytes());
+            Some((rep, 5))
+        }
+        // DATA_V2 [offset LE32][data<=1400] -> [06][expected LE32];
+        // writes only when the offset matches the received count
+        // (out-of-order/duplicates dropped; host does go-back-N).
+        // Pages are committed one at a time with a yield in between: the
+        // whole-slot freeze of a single 1400 B write starves the net poll
+        // task long enough for the W5500 MACRAW buffer to drop a window.
+        0x06 => {
+            if payload.len() < 5 {
+                return Some(([0; 8], 0));
+            }
+            let off = u32::from_le_bytes([payload[0], payload[1], payload[2], payload[3]]);
+            if off == crate::fw::received() {
+                let mut data = &payload[4..];
+                while !data.is_empty() {
+                    let n = data.len().min(256);
+                    crate::fw::write(&data[..n]);
+                    data = &data[n..];
+                    if !data.is_empty() {
+                        embassy_futures::yield_now().await;
+                    }
+                }
+            }
+            let mut rep = [0u8; 8];
+            rep[0] = 0x06;
+            rep[1..5].copy_from_slice(&crate::fw::received().to_le_bytes());
+            Some((rep, 5))
+        }
+        // END [test u8][crc LE16] -> [03][ok]
+        0x03 => {
+            if payload.len() < 3 {
+                return Some(([0; 8], 0));
+            }
+            let permanent = payload[0] == 0;
+            let crc = u16::from_le_bytes([payload[1], payload[2]]);
+            let mut ok = 0u8;
+            if crate::fw::finish(Some(crc)) {
+                if crate::fw::boot_set_pending(permanent) {
+                    ok = 1;
+                }
+            }
+            crate::log::inf("fwupg: end");
+            Some(([0x03, ok, 0, 0, 0, 0, 0, 0], 2))
+        }
+        _ => None,
     }
 }
 

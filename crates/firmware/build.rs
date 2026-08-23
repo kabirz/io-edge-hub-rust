@@ -8,6 +8,12 @@ fn main() {
 
     println!("cargo:rustc-link-search=native={manifest}");
     println!("cargo:rerun-if-changed={manifest}/memory.x");
+    println!("cargo:rerun-if-changed={manifest}/ccram.x");
+    // fold linker-script sizes into a generated constant: editing
+    // memory.x/ccram.x then changes fw_version.rs, forcing a relink (cargo
+    // does not track -T scripts and a stale link is a silent boot killer)
+    let memx = std::fs::read_to_string(PathBuf::from(&manifest).join("memory.x")).unwrap_or_default();
+    let ccmx = std::fs::read_to_string(PathBuf::from(&manifest).join("ccram.x")).unwrap_or_default();
 
     // fw version string: "vM.m.p_<git6>" (same format as the C build, tools/gen_version)
     let root = PathBuf::from(&manifest).parent().unwrap().parent().unwrap().to_path_buf();
@@ -39,7 +45,10 @@ fn main() {
              pub const FW_MINOR: u8 = {min};\n\
              pub const FW_PATCH: u8 = {pat};\n\
              pub const FW_GIT: &[u8; 6] = b\"{git}\";\n\
-             pub const FW_BUILD: &str = \"{build_stamp}\";\n"
+             pub const FW_BUILD: &str = \"{build_stamp}\";\n\
+             #[allow(dead_code)] pub const LINK_SCRIPTS: (usize, usize) = ({}, {});\n",
+            memx.len(),
+            ccmx.len()
         ),
     )
     .unwrap();

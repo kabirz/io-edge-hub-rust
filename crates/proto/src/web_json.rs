@@ -158,6 +158,7 @@ mod tests {
         assert!(!history_web_name_valid(b"abc"));
         assert!(!history_web_name_valid(b"data_../../x"));
         assert!(!history_web_name_valid(b"no_data_1.raw"));
-        assert!(!history_web_name_valid(b"data_a"));
+        assert!(!history_web_name_valid(b"data_")); // len 5: C requires n > 5
+        assert!(history_web_name_valid(b"data_a")); // len 6, valid charset
     }
 }

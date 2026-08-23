@@ -204,7 +204,7 @@ pub static NOR: Mutex<CriticalSectionRawMutex, RefCell<Option<W25q>>> =
 pub static CFG: Mutex<CriticalSectionRawMutex, RefCell<(Option<u32>, u32)>> =
     Mutex::new(RefCell::new((None, 0)));
 
-fn nor_with<R>(f: impl FnOnce(&mut W25q) -> R) -> Option<R> {
+pub fn nor_with<R>(f: impl FnOnce(&mut W25q) -> R) -> Option<R> {
     critical_section::with(|_cs| NOR.lock(|r| r.borrow_mut().as_mut().map(f)))
 }
 
@@ -595,7 +595,11 @@ pub async fn storage_task() {
                 let enabled = critical_section::with(|_cs| {
                     REGS.lock(|r| r.borrow().get_holding(HOLDING_HISTORY_ENABLE_IDX as u16) != 0)
                 });
-                if enabled {
+                // skip while a firmware upgrade is streaming into slot1:
+                // littlefs rotation erases freeze IRQs for seconds and the
+                // W5500 MACRAW buffer drops the upgrade window bursts (the C
+                // box blocked here on the flash lock instead, keeping net up)
+                if enabled && !crate::fw::active() {
                     hist_write(&mut *fs, &mut st, &d);
                 }
             }

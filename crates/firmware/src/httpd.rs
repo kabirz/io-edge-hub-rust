@@ -673,12 +673,15 @@ async fn ws_session(sock: &mut TcpSocket<'static>, pending: &[u8]) {
     let mut out: heapless::Vec<u8, 768> = heapless::Vec::new();
     let mut scratch = [0u8; 800];
     let mut alive = true;
+    // fw upload CRC accumulated over accepted binary frames (ws.c ws.fw_crc)
+    let mut fw_crc = 0u16;
 
     // frames complete inside the sync parser: queue replies, flush after
     let mut step = |parser: &mut WsParser,
                     data: &[u8],
                     out: &mut heapless::Vec<u8, 768>,
-                    alive: &mut bool| {
+                    alive: &mut bool,
+                    fw_crc: &mut u16| {
         *alive &= parser.feed(data, |p, ev| match ev {
             FeedEvent::Close => *alive = false,
             FeedEvent::Frame { fin, opcode, payload_len } => {
@@ -691,7 +694,22 @@ async fn ws_session(sock: &mut TcpSocket<'static>, pending: &[u8]) {
                 match opcode {
                     0x1 => {
                         let n = payload_len.min(255);
-                        ws_handle_cmd(out, &p.payload[..n]);
+                        ws_handle_cmd(out, &p.payload[..n], fw_crc);
+                    }
+                    // binary: firmware data frames straight into the page
+                    // buffer (fw_upg_write), CRC over accepted frames
+                    0x2 => {
+                        if crate::fw::active() {
+                            let n = payload_len.min(p.payload.len());
+                            if crate::fw::write(&p.payload[..n]) {
+                                *fw_crc = io_edge_hub_proto::fw_upg::crc16_ccitt(
+                                    *fw_crc,
+                                    &p.payload[..n],
+                                );
+                            } else {
+                                crate::log::wrn("ws fw: write failed");
+                            }
+                        }
                     }
                     0x8 => {
                         // close: reply close then end the session
@@ -706,7 +724,7 @@ async fn ws_session(sock: &mut TcpSocket<'static>, pending: &[u8]) {
         });
     };
 
-    step(&mut parser, pending, &mut out, &mut alive);
+    step(&mut parser, pending, &mut out, &mut alive, &mut fw_crc);
     let _ = sock.write_all(&out).await;
     let _ = sock.flush().await;
     if !alive {
@@ -729,7 +747,7 @@ async fn ws_session(sock: &mut TcpSocket<'static>, pending: &[u8]) {
                 Ok(0) | Err(_) => return,
                 Ok(n) => {
                     out.clear();
-                    step(&mut parser, &rbuf[..n], &mut out, &mut alive);
+                    step(&mut parser, &rbuf[..n], &mut out, &mut alive, &mut fw_crc);
                     let _ = sock.write_all(&out).await;
                     let _ = sock.flush().await;
                     if !alive {
@@ -760,7 +778,7 @@ async fn ws_session(sock: &mut TcpSocket<'static>, pending: &[u8]) {
 /// payload is the full JSON text; "cmd" selects the executor and the
 /// remaining fields are parsed from the same buffer (C passes the slice
 /// from the cmd value onward — same effect).
-fn ws_handle_cmd(out: &mut heapless::Vec<u8, 768>, payload: &[u8]) {
+fn ws_handle_cmd(out: &mut heapless::Vec<u8, 768>, payload: &[u8], fw_crc: &mut u16) {
     let cmd = json_get_str(payload, "cmd").unwrap_or(b"");
     if cmd == b"do" {
         if let (Some(i), Some(v)) = (json_get_i32(payload, "index"), json_get_i32(payload, "value")) {
@@ -820,7 +838,78 @@ fn ws_handle_cmd(out: &mut heapless::Vec<u8, 768>, payload: &[u8]) {
         crate::appstate::set_reboot_status(true);
         return;
     }
+    if cmd == b"fw_start" {
+        let size = json_get_i32(payload, "size").unwrap_or(0);
+        if size <= 0 {
+            ws_queue_frame(out, 0x1, b"{\"ok\":false,\"err\":\"bad size\"}");
+            return;
+        }
+        let mut kh_buf = [0u8; 32];
+        let mut kh: Option<&[u8; 32]> = None;
+        if let Some(b64) = json_get_str(payload, "keyhash") {
+            match io_edge_hub_proto::fw_upg::b64_decode(b64, &mut kh_buf) {
+                Some(32) => kh = Some(&kh_buf),
+                _ => {
+                    ws_queue_frame(out, 0x1, b"{\"ok\":false,\"err\":\"keyhash mismatch\"}");
+                    return;
+                }
+            }
+        }
+        let rc = crate::fw::start(size as u32, kh);
+        let r: &[u8] = match rc {
+            0 => {
+                crate::log::inf("ws fw: start");
+                b"{\"ok\":true}"
+            }
+            -2 => b"{\"ok\":false,\"err\":\"keyhash mismatch\"}",
+            -3 => b"{\"ok\":false,\"err\":\"already in progress\"}",
+            _ => b"{\"ok\":false,\"err\":\"erase/init\"}",
+        };
+        ws_queue_frame(out, 0x1, r);
+        return;
+    }
+    if cmd == b"fw_end" {
+        if !crate::fw::active() {
+            ws_queue_frame(out, 0x1, b"{\"ok\":false,\"err\":\"not in progress\"}");
+            return;
+        }
+        let r = ws_fw_end(fw_crc);
+        if r == b"{\"ok\":true}" {
+            // flush history, then the heartbeat task does the graceful reboot
+            crate::storage::QUEUE
+                .try_send(crate::storage::StorageCmd::Sync)
+                .ok();
+            crate::appstate::set_reboot_status(true);
+        }
+        ws_queue_frame(out, 0x1, r);
+        return;
+    }
     ws_queue_frame(out, 0x1, b"{\"ok\":false,\"err\":\"unknown cmd\"}");
+}
+
+/// WS fw_end worker semantics (ws.c ws_fw_task): size precheck, CRC/TLV
+/// readback verify, request the swap, reply.
+fn ws_fw_end(fw_crc: &mut u16) -> &'static [u8] {
+    let got = crate::fw::received();
+    if got == 0 {
+        crate::fw::abort();
+        return b"{\"ok\":false,\"err\":\"no data\"}";
+    }
+    if got != crate::fw::total() {
+        crate::fw::abort();
+        crate::log::wrn("ws fw: size mismatch");
+        return b"{\"ok\":false,\"err\":\"size mismatch\"}";
+    }
+    if !crate::fw::finish(Some(*fw_crc)) {
+        *fw_crc = 0;
+        return b"{\"ok\":false,\"err\":\"crc mismatch\"}";
+    }
+    *fw_crc = 0;
+    if !crate::fw::boot_set_pending(true) {
+        return b"{\"ok\":false,\"err\":\"boot_request\"}";
+    }
+    crate::log::inf("ws fw: verified, rebooting for swap");
+    b"{\"ok\":true}"
 }
 
 // ==================== JSON builders (web_cmds.c) ====================

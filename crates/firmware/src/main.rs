@@ -3,6 +3,7 @@
 
 mod appstate;
 mod ftpd;
+mod fw;
 mod httpd;
 mod io_gpio;
 mod log;
@@ -70,6 +71,21 @@ async fn main(spawner: Spawner) {
             cortex_m::asm::nop();
         }
         cortex_m::interrupt::enable();
+    }
+    // .ccm.bss is NOLOAD and outside the runtime's .bss zero loop, but the
+    // statics placed there (StaticCell) require zeroed memory for their
+    // double-init check — zero the region before any task runs.
+    unsafe {
+        extern "C" {
+            static mut __sccm: u32;
+            static mut __eccm: u32;
+        }
+        let mut p = core::ptr::addr_of_mut!(__sccm);
+        let end = core::ptr::addr_of_mut!(__eccm);
+        while p < end {
+            p.write_volatile(0);
+            p = p.add(1);
+        }
     }
     let dp = embassy_stm32::init(board_config());
 
@@ -377,3 +393,4 @@ fn panic(info: &core::panic::PanicInfo) -> ! {
     }
     cortex_m::asm::udf()
 }
+
