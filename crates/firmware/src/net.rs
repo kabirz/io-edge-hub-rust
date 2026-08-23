@@ -220,6 +220,38 @@ async fn udp_task(stack: Stack<'static>) {
 
         let mut rep = [0u8; 64];
 
+        // debug: cmd 0xFC dumps storage RPC state
+        if cmd == 0xFC {
+            let (dl, seq) = critical_section::with(|_cs| {
+                crate::storage::FILE_DL.lock(|f| {
+                    let g = f.borrow();
+                    (
+                        (g.open, g.eof, g.err, g.size, g.sent, g.chunk_len),
+                        crate::storage::RPC_SEQ.load(core::sync::atomic::Ordering::Relaxed),
+                    )
+                })
+            });
+            let mut rep = [0u8; 16];
+            rep[0] = 0xFC;
+            rep[1] = seq as u8;
+            rep[2] = (seq >> 8) as u8;
+            rep[3] = (seq >> 16) as u8;
+            rep[4] = (seq >> 24) as u8;
+            rep[5] = dl.0 as u8; // open
+            rep[6] = dl.1 as u8; // eof
+            rep[7] = dl.2 as u8; // err
+            rep[8] = (dl.3 >> 24) as u8;
+            rep[9] = (dl.3 >> 16) as u8;
+            rep[10] = (dl.3 >> 8) as u8;
+            rep[11] = dl.3 as u8;
+            rep[12] = (dl.4 >> 24) as u8;
+            rep[13] = (dl.4 >> 16) as u8;
+            rep[14] = (dl.4 >> 8) as u8;
+            rep[15] = dl.4 as u8;
+            sock.send_to(&rep, meta.endpoint).await.ok();
+            continue;
+        }
+
         let rlen = critical_section::with(|_cs| {
             REGS.lock(|r| {
                 UDP_STATE.lock(|st| {

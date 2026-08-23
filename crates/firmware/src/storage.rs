@@ -6,14 +6,16 @@
 //! flash operation, so network/Modbus keep running. Producers talk to this
 //! task through [QUEUE] (history.c's queue semantics: full queue drops).
 
-use core::cell::RefCell;
+use core::cell::{RefCell, UnsafeCell};
+use core::mem::MaybeUninit;
 
 use embassy_sync::blocking_mutex::Mutex;
 use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
 use embassy_sync::channel::Channel;
 use generic_array::typenum::consts::{U1024, U4};
 use littlefs2::driver::Storage;
-use littlefs2::fs::{Allocation, Filesystem, OpenOptions};
+use littlefs2::fs::{Allocation, File, FileAllocation, Filesystem, OpenOptions};
+use littlefs2::io as lfs_io;
 
 use io_edge_hub_proto::config_store::{
     self as cs, IoCfg, CFG_SLOT_A, CFG_SLOT_B, CFG_SLOT_SIZE,
@@ -49,7 +51,100 @@ pub enum StorageCmd {
     Sync,
     CfgSave,
     CfgEraseAll,
+    /// Web RPC: refresh FS_SNAP (root listing + usage) from littlefs.
+    SnapReq,
+    /// Web RPC: delete one data_*.raw by name.
+    Del([u8; 24]),
+    /// Web RPC: open a file for chunked download (FILE_DL <- size).
+    FileOpen([u8; 24]),
+    /// Web RPC: fill FILE_DL.chunk with the next block (512 B).
+    FileChunk,
 }
+
+/// Root-listing + usage snapshot refreshed on SnapReq (history_web_list_json
+/// + history_web_usage). 10 entries x (20 B NUL-padded name + 4 B BE size).
+pub struct FsSnap {
+    pub entries: [[u8; 24]; 10],
+    pub count: usize,
+    pub free: u32,
+    pub total: u32,
+    pub gen: u32,
+}
+
+pub static FS_SNAP: Mutex<CriticalSectionRawMutex, RefCell<FsSnap>> =
+    Mutex::new(RefCell::new(FsSnap {
+        entries: [[0; 24]; 10],
+        count: 0,
+        free: 0,
+        total: 0x00F1_0000, // littlefs partition size
+        gen: 0,
+    }));
+
+/// Persistent open history file (C's his_fp): kept open across records so a
+/// sampling append is one buffered write instead of open+write+close.
+/// Sound as !Send: single-core, every access under a critical section.
+struct OpenFile {
+    file: Option<File<'static, 'static, LfsNor>>,
+}
+unsafe impl Send for OpenFile {}
+
+static OPEN_FILE: Mutex<CriticalSectionRawMutex, RefCell<Option<OpenFile>>> =
+    Mutex::new(RefCell::new(None));
+
+/// File-cache allocation with a stable address (littlefs embeds the buffer
+/// pointer into the open lfs_file_t: the holder must never move while a
+/// file is open, so the allocation lives here, outside OPEN_FILE).
+struct AllocCell(UnsafeCell<MaybeUninit<FileAllocation<LfsNor>>>);
+unsafe impl Sync for AllocCell {}
+static FILE_ALLOC: AllocCell = AllocCell(UnsafeCell::new(MaybeUninit::zeroed()));
+static DL_ALLOC: AllocCell = AllocCell(UnsafeCell::new(MaybeUninit::zeroed()));
+
+/// Init once from the storage task; returns the stable &'static mut.
+unsafe fn alloc_get(cell: &AllocCell) -> &'static mut FileAllocation<LfsNor> {
+    // the cell is zeroed until first use; FileAllocation::new is not const
+    let p = cell.0.get();
+    if (*p).assume_init_ref() as *const _ as usize == 0 {
+        (*p).write(FileAllocation::new());
+    }
+    (*p).assume_init_mut()
+}
+
+/// Persistent download handle (httpd chunked reads continue sequentially —
+/// no reopen+seek per chunk, which made big downloads O(n^2)).
+struct DlFile(Option<File<'static, 'static, LfsNor>>);
+unsafe impl Send for DlFile {}
+static DOWNLOAD_FILE: Mutex<CriticalSectionRawMutex, RefCell<DlFile>> =
+    Mutex::new(RefCell::new(DlFile(None)));
+
+/// Chunked-download state machine shared between httpd and the storage task.
+pub struct FileDl {
+    pub name: [u8; 24],
+    pub size: u32,
+    pub sent: u32,
+    pub chunk: [u8; 512],
+    pub chunk_len: usize,
+    pub open: bool,
+    pub eof: bool,
+    pub err: bool,
+}
+
+pub static FILE_DL: Mutex<CriticalSectionRawMutex, RefCell<FileDl>> = Mutex::new(RefCell::new(
+    FileDl {
+        name: [0; 24],
+        size: 0,
+        sent: 0,
+        chunk: [0; 512],
+        chunk_len: 0,
+        open: false,
+        eof: false,
+        err: false,
+    },
+));
+
+/// Generation counter for the web RPCs: bumped once per processed command.
+/// The httpd side snapshots it before sending and polls until it advances —
+/// no stale-signal races (a Signal latches old values and wakes immediately).
+pub static RPC_SEQ: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(0);
 
 pub static NOR: Mutex<CriticalSectionRawMutex, RefCell<Option<W25q>>> =
     Mutex::new(RefCell::new(None));
@@ -232,34 +327,64 @@ fn hist_write(fs: &mut Filesystem<'_, LfsNor>, st: &mut HistState, d: &HisData) 
     let mut rec = d.to_bytes();
     let rec = &mut rec[..d.rec_len()];
 
-    // ensure_file: continue the current file if still under the size cap
-    if st.name_len > 0 {
-        if append_once(fs, st, rec, false) {
-            return;
-        }
-        st.name_len = 0; // full or gone (FTP cleanup): pick a new file
+    // fast path: the open file stays open across records (C's his_fp) —
+    // one buffered append + sync, no open/close metadata churn per record
+    let mut rotated = false;
+    critical_section::with(|_cs| {
+        OPEN_FILE.lock(|o| {
+            let mut g = o.borrow_mut();
+            if let Some(holder) = g.as_mut() {
+                if let Some(f) = holder.file.as_mut() {
+                    if let Ok(len) = f.len() {
+                        if (len as u32) < HIST_FILE_MAX {
+                            if f.write(rec).is_ok() {
+                                let _ = f.sync();
+                            }
+                            return;
+                        }
+                    }
+                }
+            }
+            rotated = true; // no open file or full: rotate below
+        });
+    });
+    if !rotated {
+        return;
     }
+    // close a full file (keeps the name for continuation semantics)
+    critical_section::with(|_cs| {
+        OPEN_FILE.lock(|o| {
+            if let Some(holder) = o.borrow_mut().as_mut() {
+                if let Some(f) = holder.file.take() {
+                    unsafe {
+                        let _ = f.close();
+                    }
+                }
+            }
+        })
+    });
 
-    // first write this session: reuse the newest data_*.raw under the cap
-    if let Some(latest) = find_latest(fs) {
-        st.set(&latest);
-        if append_once(fs, st, rec, false) {
-            return;
+    // reopen path: try the retained name, then the newest data_*.raw
+    if st.name_len == 0 {
+        if let Some(latest) = find_latest(&mut *fs) {
+            st.set(&latest);
         }
-        st.name_len = 0;
+    }
+    if st.name_len > 0 && open_append(&mut *fs, st, rec, false) {
+        return;
     }
 
     // create a fresh file; empty file triggers retention cleanup
     let name = make_hist_name(crate::systime::now_epoch());
     st.set(&name);
-    if append_once(fs, st, rec, true) {
-        cleanup_old_files(fs);
+    if open_append(&mut *fs, st, rec, true) {
+        cleanup_old_files(&mut *fs);
     }
 }
 
-/// Open-append one record; `create` allows creating the file (rotate path).
-/// Returns false when the file is missing or already at the size cap.
-fn append_once(
+/// Open (or create) the current file, append one record, KEEP THE FILE OPEN
+/// for the next record. `create` allows creating (rotate path).
+fn open_append(
     fs: &mut Filesystem<'_, LfsNor>,
     st: &mut HistState,
     rec: &mut [u8],
@@ -269,26 +394,38 @@ fn append_once(
         Some(p) => p,
         None => return false,
     };
-    if let Ok(md) = fs.metadata(path) {
-        if md.len() as u32 >= HIST_FILE_MAX {
+    if !create {
+        if let Ok(md) = fs.metadata(path) {
+            if md.len() as u32 >= HIST_FILE_MAX {
+                return false;
+            }
+        } else {
             return false;
         }
-    } else if !create {
-        return false;
     }
-    fs.open_file_with_options_and_then(
-        |mut o| {
-            o.write(true).append(true);
-            if create {
-                o.create(true);
+    // the returned File is stored in OPEN_FILE as File<'static>: extend the
+    // borrow unsafely — the storage task outlives every call and all access
+    // to the file happens from this task under OPEN_FILE's critical section
+    let fs: &'static mut Filesystem<'static, LfsNor> = unsafe { core::mem::transmute(fs) };
+    let mut opts = OpenOptions::new();
+    opts.write(true).append(true);
+    if create {
+        opts.create(true);
+    }
+    let alloc = unsafe { alloc_get(&FILE_ALLOC) };
+    match unsafe { opts.open(fs, alloc, path) } {
+        Ok(mut file) => {
+            let ok = file.write(rec).is_ok();
+            if ok {
+                let _ = file.sync();
             }
-            o
-        },
-        path,
-        |f| f.write(rec),
-    )
-    .map(|_| true)
-    .unwrap_or(false)
+            critical_section::with(|_cs| {
+                OPEN_FILE.lock(|o| *o.borrow_mut() = Some(OpenFile { file: Some(file) }))
+            });
+            ok
+        }
+        Err(_) => false,
+    }
 }
 
 fn find_latest(fs: &mut Filesystem<'_, LfsNor>) -> Option<[u8; 24]> {
@@ -339,7 +476,14 @@ fn cleanup_old_files(fs: &mut Filesystem<'_, LfsNor>) {
                 min_i = i;
             }
         }
-        if let Ok(p) = littlefs2::path::Path::from_bytes_with_nul(&names[min_i]) {
+        let np = {
+            let nlen = names[min_i].iter().position(|&b| b == 0).unwrap_or(24);
+            if nlen >= 24 {
+                continue;
+            }
+            littlefs2::path::Path::from_bytes_with_nul(&names[min_i][..nlen + 1]).ok()
+        };
+        if let Some(p) = np {
             fs.remove(p).ok();
             crate::log::inf("history: rotated out old file");
         }
@@ -384,7 +528,15 @@ pub async fn storage_task() {
         }
     };
     crate::log::inf("lfs: mounted");
+    fs_snapshot(&mut fs); // populate usage for /api/info from boot
+    unsafe { alloc_get(&FILE_ALLOC) }; // place the cache at its final address
+    critical_section::with(|_cs| {
+        OPEN_FILE.lock(|o| *o.borrow_mut() = Some(OpenFile { file: None }))
+    });
 
+    // the task never exits: lend the filesystem 'static so the persistent
+    // history file can outlive individual write calls
+    let fs: &'static mut Filesystem<'static, LfsNor> = unsafe { core::mem::transmute(&mut fs) };
     let mut st = HistState::new();
     loop {
         match QUEUE.receive().await {
@@ -393,18 +545,249 @@ pub async fn storage_task() {
                     REGS.lock(|r| r.borrow().get_holding(HOLDING_HISTORY_ENABLE_IDX as u16) != 0)
                 });
                 if enabled {
-                    hist_write(&mut fs, &mut st, &d);
+                    hist_write(&mut *fs, &mut st, &d);
                 }
             }
             // per-op open/write/close already persists each record; the
             // disable/enable file-continuation semantic is carried by st's
             // retained name, so these are bookkeeping no-ops by design
-            StorageCmd::CloseKeepName => {}
+            StorageCmd::CloseKeepName => {
+                critical_section::with(|_cs| {
+                    OPEN_FILE.lock(|o| {
+                        if let Some(mut g) = o.borrow_mut().take() {
+                            if let Some(f) = g.file.take() {
+                                unsafe {
+                                    let _ = f.close();
+                                }
+                            }
+                        }
+                        // put the (now file-less) holder back
+                        *o.borrow_mut() = Some(OpenFile { file: None });
+                    })
+                });
+            }
             StorageCmd::Sync => {}
             StorageCmd::CfgSave => cfg_save(),
             StorageCmd::CfgEraseAll => cfg_erase_all(),
+            StorageCmd::SnapReq => {
+                let _ = fs_snapshot(&mut *fs);
+                RPC_SEQ.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+            }
+            StorageCmd::Del(name) => {
+                if let Some(p) = path_of(&name) {
+                    fs.remove(p).ok();
+                    crate::log::inf("history: deleted (web)");
+                }
+            }
+            StorageCmd::FileOpen(name) => {
+                let _ = file_open(&mut *fs, &name);
+                RPC_SEQ.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+            }
+            StorageCmd::FileChunk => {
+                let _ = file_chunk(&mut *fs);
+                RPC_SEQ.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+            }
         }
     }
+}
+
+
+/// Path bytes -> &Path: slice to the first NUL (names arrive as [u8; 24]
+/// fixed buffers; from_bytes_with_nul demands NUL be the last byte).
+fn path_of(name: &[u8; 24]) -> Option<&littlefs2::path::Path> {
+    let len = name.iter().position(|&b| b == 0).unwrap_or(24);
+    if len == 0 || len >= 24 {
+        return None;
+    }
+    littlefs2::path::Path::from_bytes_with_nul(&name[..len + 1]).ok()
+}
+
+/// Refresh FS_SNAP from the mounted filesystem (history_web_list_json +
+/// history_web_usage equivalents).
+fn fs_snapshot(fs: &mut Filesystem<'_, LfsNor>) -> bool {
+    let mut snap = FsSnap {
+        entries: [[0; 24]; 10],
+        count: 0,
+        free: 0,
+        total: 0x00F1_0000,
+        gen: 0,
+    };
+    fs.read_dir_and_then(b"/\0".try_into().unwrap(), |dir| {
+        for entry in dir.flatten() {
+            if snap.count >= 10 {
+                break;
+            }
+            let b = entry.file_name().as_str().as_bytes();
+            let l = b.len().min(20);
+            if l > 5 && &b[..5] == b"data_" {
+                let size = entry.metadata().len() as u32;
+                snap.entries[snap.count][..l].copy_from_slice(&b[..l]);
+                snap.entries[snap.count][20] = (size >> 24) as u8;
+                snap.entries[snap.count][21] = (size >> 16) as u8;
+                snap.entries[snap.count][22] = (size >> 8) as u8;
+                snap.entries[snap.count][23] = size as u8;
+                snap.count += 1;
+            }
+        }
+        Ok(())
+    })
+    .ok();
+    // sort entries newest-first (name order = time order, like the C list)
+    snap.entries[..snap.count].sort_unstable_by(|a, b| b[..20].cmp(&a[..20]));
+    if let Ok(blocks) = fs.available_blocks() {
+        snap.free = (blocks as u32) * 4096;
+    }
+    critical_section::with(|_cs| {
+        FS_SNAP.lock(|s| {
+            let mut g = s.borrow_mut();
+            snap.gen = g.gen.wrapping_add(1);
+            *g = snap;
+        })
+    });
+    true
+}
+
+/// Open a data_*.raw for chunked download (history_web_open): opens the
+/// file once; FileChunk reads continue sequentially from the handle.
+fn file_open(fs: &mut Filesystem<'_, LfsNor>, name: &[u8; 24]) -> bool {
+    // close any stale handle first
+    critical_section::with(|_cs| {
+        DOWNLOAD_FILE.lock(|d| {
+            if let Some(f) = d.borrow_mut().0.take() {
+                unsafe {
+                    let _ = f.close();
+                }
+            }
+        })
+    });
+    critical_section::with(|_cs| {
+        FILE_DL.lock(|f| {
+            let mut g = f.borrow_mut();
+            g.open = false;
+            g.eof = false;
+            g.err = false;
+            g.size = 0;
+            g.sent = 0;
+            g.chunk_len = 0;
+        })
+    });
+    let path = match path_of(name) {
+        Some(p) => p,
+        None => return false,
+    };
+    let fs: &'static mut Filesystem<'static, LfsNor> = unsafe { core::mem::transmute(fs) };
+    let mut opts = OpenOptions::new();
+    opts.read(true);
+    let alloc = unsafe { alloc_get(&DL_ALLOC) };
+    match unsafe { opts.open(fs, alloc, path) } {
+        Ok(file) => {
+            let size = file.len().unwrap_or(0) as u32;
+            critical_section::with(|_cs| {
+                FILE_DL.lock(|f| {
+                    let mut g = f.borrow_mut();
+                    g.name = *name;
+                    g.size = size;
+                    g.open = true;
+                })
+            });
+            critical_section::with(|_cs| {
+                DOWNLOAD_FILE.lock(|d| d.borrow_mut().0 = Some(file))
+            });
+            true
+        }
+        Err(_) => false,
+    }
+}
+
+/// Read the next 512 B block into FILE_DL.chunk (history_web_read).
+fn file_chunk(_fs: &mut Filesystem<'_, LfsNor>) -> bool {
+    let (sent, size, open) = critical_section::with(|_cs| {
+        FILE_DL.lock(|f| {
+            let g = f.borrow();
+            (g.sent, g.size, g.open)
+        })
+    });
+    if !open {
+        return true;
+    }
+    if sent >= size {
+        critical_section::with(|_cs| {
+            FILE_DL.lock(|f| f.borrow_mut().eof = true)
+        });
+        // close the finished handle
+        critical_section::with(|_cs| {
+            DOWNLOAD_FILE.lock(|d| {
+                if let Some(f) = d.borrow_mut().0.take() {
+                    unsafe {
+                        let _ = f.close();
+                    }
+                }
+            })
+        });
+        return true;
+    }
+    let mut buf = [0u8; 512];
+    let n = critical_section::with(|_cs| {
+        DOWNLOAD_FILE.lock(|d| {
+            let mut g = d.borrow_mut();
+            match g.0.as_mut() {
+                Some(file) => file.read(&mut buf).unwrap_or(0),
+                None => {
+                    g.0.take(); // no handle: error
+                    0
+                }
+            }
+        })
+    });
+    let n = if n == 0 { 0 } else { n };
+    if n == 0 {
+        critical_section::with(|_cs| {
+            FILE_DL.lock(|f| {
+                f.borrow_mut().err = true;
+                f.borrow_mut().eof = true;
+            })
+        });
+        critical_section::with(|_cs| {
+            DOWNLOAD_FILE.lock(|d| {
+                if let Some(f) = d.borrow_mut().0.take() {
+                    unsafe {
+                        let _ = f.close();
+                    }
+                }
+            })
+        });
+        return false;
+    }
+    critical_section::with(|_cs| {
+        FILE_DL.lock(|f| {
+            let mut g = f.borrow_mut();
+            g.chunk[..n].copy_from_slice(&buf[..n]);
+            g.chunk_len = n;
+            g.sent += n as u32;
+            if g.sent >= g.size {
+                g.eof = true;
+            }
+        })
+    });
+    // finished: close the handle now
+    let done = critical_section::with(|_cs| {
+        FILE_DL.lock(|f| {
+            let g = f.borrow();
+            g.eof
+        })
+    });
+    if done {
+        critical_section::with(|_cs| {
+            DOWNLOAD_FILE.lock(|d| {
+                if let Some(f) = d.borrow_mut().0.take() {
+                    unsafe {
+                        let _ = f.close();
+                    }
+                }
+            })
+        });
+    }
+    true
 }
 
 fn cfg_erase_all() {

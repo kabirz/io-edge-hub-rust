@@ -8,6 +8,13 @@ pub fn json_get_i32(body: &[u8], key: &str) -> Option<i32> {
     let s = core::str::from_utf8(v).ok()?;
     // number: optional sign + digits, nothing else
     let t = s.trim();
+    // JSON booleans (the web UI posts hist_en as true/false)
+    if t == "true" {
+        return Some(1);
+    }
+    if t == "false" {
+        return Some(0);
+    }
     if t.is_empty() {
         return None;
     }

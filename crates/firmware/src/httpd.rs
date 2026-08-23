@@ -6,13 +6,16 @@ use core::fmt::Write as _;
 
 use embassy_net::tcp::TcpSocket;
 use embassy_net::{IpAddress, Stack, Ipv4Address};
-use embassy_time::{Duration, Instant, Timer};
+use core::sync::atomic::{AtomicBool, Ordering};
+
+use embassy_time::{Duration, Instant, Ticker, Timer};
 use embedded_io_async::Write as _;
 
 use io_edge_hub_proto::regmap::{
     self as rm, RegHooks, RegMap,
 };
 use io_edge_hub_proto::web_json::{history_web_name_valid, json_get_i32, json_get_str, url_query_get};
+use io_edge_hub_proto::ws::{FeedEvent, WsParser, ws_accept_key, ws_frame_hdr};
 
 use crate::appstate::{Hooks, REGS, version};
 use crate::{log, reboot, systime};
@@ -23,6 +26,9 @@ const RX_BUF: usize = 640;
 const BODY_MAX: usize = 128;
 
 static INDEX_GZ: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/index_html.gz"));
+
+/// Single WS session (ws.c ws.active): the 2nd upgrade gets 503 "ws busy".
+static WS_ACTIVE: AtomicBool = AtomicBool::new(false);
 
 #[embassy_executor::task(pool_size = 2)]
 pub async fn http_task(stack: Stack<'static>, rx_buf: &'static mut [u8; RX_BUF], tx_buf: &'static mut [u8; 2048]) {
@@ -92,7 +98,9 @@ async fn serve(sock: &mut TcpSocket<'static>) {
             };
             let method = core::str::from_utf8(&m[..mlen]).unwrap_or("");
             let content_len = hdr_content_len(&rbuf[..he]);
-            let cli_close = hdr_has(&rbuf[..he], b"Connection: close");
+            let cli_close = hdr_find(&rbuf[..he], b"Connection:")
+                .map(|v| v.trim_ascii().eq_ignore_ascii_case(b"close"))
+                .unwrap_or(false);
 
             if content_len > BODY_MAX {
                 respond(sock, "400 Bad Request", "application/json",
@@ -102,6 +110,43 @@ async fn serve(sock: &mut TcpSocket<'static>) {
 
             if method == "GET" {
                 let used = he + 4;
+                // /ws upgrade: handshake then the connection becomes a WS session
+                if target[..tlen] == *b"/ws" && hdr_eq(&rbuf[..he], b"Upgrade:", b"websocket") {
+                    // claim the single-session slot BEFORE any await: the 101
+                    // write/flush below yields, and a racing upgrade on the
+                    // other task would otherwise pass the active check
+                    if WS_ACTIVE
+                        .compare_exchange(false, true, Ordering::Relaxed, Ordering::Relaxed)
+                        .is_err()
+                    {
+                        respond(sock, "503 Service Unavailable", "application/json",
+                            b"{\"ok\":false,\"err\":\"ws busy\"}", false).await;
+                        // let the 503 segment get ACKed before the task-loop
+                        // abort() discards it (RST eats unACKed data)
+                        Timer::after_millis(50).await;
+                        return;
+                    }
+                    if let Some(accept) = ws_extract_key(&rbuf[..he]) {
+                        let accept = ws_accept_key(&accept);
+                        let mut resp = heapless::String::<160>::new();
+                        let _ = write!(
+                            &mut resp,
+                            "HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\n\
+Connection: Upgrade\r\nSec-WebSocket-Accept: {}\r\n\r\n",
+                            core::str::from_utf8(&accept).unwrap_or("")
+                        );
+                        let _ = sock.write_all(resp.as_bytes()).await;
+                        let _ = sock.flush().await;
+                        log::inf("ws: connected");
+                        let pending_len = rx_len - used;
+                        ws_session(sock, &rbuf[used..used + pending_len]).await;
+                        log::inf("ws: closed");
+                    } else {
+                        json_err(sock, "400 Bad Request", "bad request").await;
+                    }
+                    WS_ACTIVE.store(false, Ordering::Relaxed);
+                    return;
+                }
                 dispatch(sock, method, &target[..tlen], None).await;
                 if cli_close {
                     return;
@@ -184,6 +229,14 @@ fn hdr_has(hdr: &[u8], needle: &[u8]) -> bool {
     hdr_find(hdr, needle).is_some()
 }
 
+/// "Key: value" comparison with the value trimmed (case-insensitive).
+fn hdr_eq(hdr: &[u8], key: &[u8], want: &[u8]) -> bool {
+    match hdr_find(hdr, key) {
+        Some(v) => v.trim_ascii().eq_ignore_ascii_case(want),
+        None => false,
+    }
+}
+
 /// case-insensitive header lookup, value trimmed (httpd.c hdr_find)
 fn hdr_find<'a>(hdr: &'a [u8], key: &[u8]) -> Option<&'a [u8]> {
     let mut i = 0usize;
@@ -231,6 +284,18 @@ async fn respond_extra(sock: &mut TcpSocket<'static>, status: &str, ctype: &str,
     let _ = sock.flush().await;
 }
 
+/// Wait until the storage task processed one more RPC (generation advance).
+async fn rpc_wait(seq_before: u32) -> bool {
+    let deadline = Instant::now() + Duration::from_millis(2500);
+    while crate::storage::RPC_SEQ.load(Ordering::Relaxed) <= seq_before {
+        if Instant::now() >= deadline {
+            return false;
+        }
+        Timer::after_millis(2).await;
+    }
+    true
+}
+
 async fn json_ok(sock: &mut TcpSocket<'static>) {
     respond(sock, "200 OK", "application/json", b"{\"ok\":true}", true).await;
 }
@@ -275,22 +340,109 @@ async fn dispatch(sock: &mut TcpSocket<'static>, method: &str, target: &[u8], bo
         return;
     }
     if is_get && path == "/api/history" {
-        // M4.1: no fs bridge yet — empty list (fs-unmounted semantic)
-        respond(sock, "200 OK", "application/json", b"{\"files\":[]}", true).await;
+        // refresh the snapshot and wait for the storage task
+        let seq = crate::storage::RPC_SEQ.load(Ordering::Relaxed);
+        if crate::storage::QUEUE
+            .try_send(crate::storage::StorageCmd::SnapReq)
+            .is_ok()
+        {
+            let _ = rpc_wait(seq).await;
+        }
+        let mut b = heapless::String::<512>::new();
+        let _ = write!(b, "{{\"files\":[");
+        let snap = critical_section::with(|_cs| {
+            crate::storage::FS_SNAP.lock(|s| {
+                let g = s.borrow();
+                (g.entries, g.count)
+            })
+        });
+        for i in 0..snap.1 {
+            let e = &snap.0[i];
+            let name_end = e[..20].iter().position(|&c| c == 0).unwrap_or(20);
+            let size = u32::from_be_bytes([e[20], e[21], e[22], e[23]]);
+            let _ = write!(
+                b,
+                "{}{{\"name\":\"{}\",\"size\":{}}}",
+                if i > 0 { "," } else { "" },
+                core::str::from_utf8(&e[..name_end]).unwrap_or(""),
+                size
+            );
+        }
+        let _ = write!(b, "]}}");
+        respond(sock, "200 OK", "application/json", b.as_bytes(), true).await;
         return;
     }
     if is_get && path == "/api/history/download" {
-        let ok = query.is_some_and(|q| {
-            url_query_get(q, "name").is_some_and(|n| {
-                history_web_name_valid(n) && n.starts_with(b"data_") && n.len() >= 6
-            })
-        });
-        if !ok {
+        let name = query.and_then(|q| url_query_get(q, "name"));
+        let valid = name.is_some_and(|n| history_web_name_valid(n));
+        if !valid {
             json_err(sock, "400 Bad Request", "invalid file name").await;
             return;
         }
-        // M4.1: valid names resolve against an (empty) file set -> not openable
-        json_err(sock, "400 Bad Request", "invalid file name").await;
+        let name = name.unwrap();
+        let mut nb = [0u8; 24];
+        let nl = name.len().min(23);
+        nb[..nl].copy_from_slice(&name[..nl]);
+        let seq = crate::storage::RPC_SEQ.load(Ordering::Relaxed);
+        crate::storage::QUEUE
+            .try_send(crate::storage::StorageCmd::FileOpen(nb))
+            .ok();
+        let ok = rpc_wait(seq).await;
+        let size = critical_section::with(|_cs| {
+            crate::storage::FILE_DL.lock(|f| f.borrow().size)
+        });
+        if !ok || size == 0 {
+            json_err(sock, "400 Bad Request", "invalid file name").await;
+            return;
+        }
+        // header + chunked body from the storage task
+        let mut hdr = heapless::String::<256>::new();
+        let _ = write!(
+            hdr,
+            "HTTP/1.1 200 OK\r\nContent-Type: application/octet-stream\r\n\
+Content-Length: {}\r\nConnection: close\r\n\
+Content-Disposition: attachment; filename=\"{}\"\r\n\r\n",
+            size,
+            core::str::from_utf8(&nb[..nl]).unwrap_or("")
+        );
+        let _ = sock.write_all(hdr.as_bytes()).await;
+        loop {
+            let seq = crate::storage::RPC_SEQ.load(Ordering::Relaxed);
+            crate::storage::QUEUE
+                .try_send(crate::storage::StorageCmd::FileChunk)
+                .ok();
+            if !rpc_wait(seq).await {
+                break;
+            }
+            let (chunk_len, eof, err, sent) = critical_section::with(|_cs| {
+                crate::storage::FILE_DL.lock(|f| {
+                    let g = f.borrow();
+                    (g.chunk_len, g.eof, g.err, g.sent)
+                })
+            });
+            if err {
+                break;
+            }
+            // write the chunk BEFORE testing done: the final partial chunk
+            // lands with sent == size and must still reach the wire
+            if chunk_len > 0 {
+                let chunk = critical_section::with(|_cs| {
+                    crate::storage::FILE_DL.lock(|f| {
+                        let g = f.borrow();
+                        let mut c = [0u8; 512];
+                        c[..g.chunk_len].copy_from_slice(&g.chunk[..g.chunk_len]);
+                        (c, g.chunk_len)
+                    })
+                });
+                if sock.write_all(&chunk.0[..chunk.1]).await.is_err() {
+                    break;
+                }
+            }
+            if (eof && chunk_len == 0) || sent >= size {
+                break;
+            }
+        }
+        let _ = sock.flush().await;
         return;
     }
     if is_post && path == "/api/do" {
@@ -358,8 +510,24 @@ async fn dispatch(sock: &mut TcpSocket<'static>, method: &str, target: &[u8], bo
         return;
     }
     if is_post && path == "/api/history/delete" {
-        // M4.1: empty fs -> delete always fails like the C path
-        json_err(sock, "400 Bad Request", "delete failed").await;
+        let b = body.unwrap_or(&[]);
+        let ok = json_get_str(b, "name").is_some_and(|n| {
+            if !history_web_name_valid(n) {
+                return false;
+            }
+            let mut nb = [0u8; 24];
+            let nl = n.len().min(23);
+            nb[..nl].copy_from_slice(&n[..nl]);
+            crate::storage::QUEUE
+                .try_send(crate::storage::StorageCmd::Del(nb))
+                .is_ok()
+        });
+        if ok {
+            crate::log::inf("history deleted (web)");
+            json_ok(sock).await;
+        } else {
+            json_err(sock, "400 Bad Request", "delete failed").await;
+        }
         return;
     }
 
@@ -463,6 +631,194 @@ fn web_cmd_cfg(body: &[u8]) -> Option<&'static str> {
     None
 }
 
+
+// ==================== WebSocket (ws.c) ====================
+
+/// Extract the 24-byte Sec-WebSocket-Key value from the request header.
+fn ws_extract_key(hdr: &[u8]) -> Option<[u8; 24]> {
+    let v = hdr_find(hdr, b"Sec-WebSocket-Key:")?;
+    if v.len() < 24 {
+        return None;
+    }
+    let mut key = [0u8; 24];
+    key.copy_from_slice(&v[..24]);
+    Some(key)
+}
+
+/// Frame bytes appended by the (sync) frame callback; flushed by the async
+/// session loop after feed() returns — socket writes must be .await'ed.
+fn ws_queue_frame(out: &mut heapless::Vec<u8, 768>, opcode: u8, payload: &[u8]) {
+    let mut hdr = [0u8; 10];
+    let hl = ws_frame_hdr(&mut hdr, opcode, payload.len());
+    out.extend_from_slice(&hdr[..hl]).ok();
+    out.extend_from_slice(payload).ok();
+}
+
+/// One text frame (header + payload) built in a scratch buffer (push path).
+fn ws_frame_buf<'a>(scratch: &'a mut [u8; 800], payload: &'a [u8]) -> &'a [u8] {
+    let mut hdr = [0u8; 10];
+    let hl = ws_frame_hdr(&mut hdr, 0x1, payload.len());
+    scratch[..hl].copy_from_slice(&hdr[..hl]);
+    scratch[hl..hl + payload.len()].copy_from_slice(payload);
+    &scratch[..hl + payload.len()]
+}
+
+async fn ws_session(sock: &mut TcpSocket<'static>, pending: &[u8]) {
+    let mut parser = WsParser::new();
+    let mut rbuf = [0u8; 2048];
+    let mut out: heapless::Vec<u8, 768> = heapless::Vec::new();
+    let mut scratch = [0u8; 800];
+    let mut alive = true;
+
+    // frames complete inside the sync parser: queue replies, flush after
+    let mut step = |parser: &mut WsParser,
+                    data: &[u8],
+                    out: &mut heapless::Vec<u8, 768>,
+                    alive: &mut bool| {
+        *alive &= parser.feed(data, |p, ev| match ev {
+            FeedEvent::Close => *alive = false,
+            FeedEvent::Frame { fin, opcode, payload_len } => {
+                if !fin {
+                    // fragmented frames unsupported (ws_frame_done)
+                    ws_queue_frame(out, 0x8, &[]);
+                    *alive = false;
+                    return;
+                }
+                match opcode {
+                    0x1 => {
+                        let n = payload_len.min(255);
+                        ws_handle_cmd(out, &p.payload[..n]);
+                    }
+                    0x8 => {
+                        // close: reply close then end the session
+                        ws_queue_frame(out, 0x8, &[]);
+                        *alive = false;
+                    }
+                    0x9 => ws_queue_frame(out, 0xA, &p.payload[..payload_len]), // ping->pong
+                    0xA => {} // pong: ignore
+                    _ => *alive = false,
+                }
+            }
+        });
+    };
+
+    step(&mut parser, pending, &mut out, &mut alive);
+    let _ = sock.write_all(&out).await;
+    let _ = sock.flush().await;
+    if !alive {
+        return;
+    }
+
+    // ~500ms to first push, then 1s io/regs + 10s info (ws_attach/ws_poll)
+    let mut push_ticker = Ticker::every(Duration::from_millis(1000));
+    let mut info_ticker = Ticker::every(Duration::from_millis(10_000));
+    Timer::after_millis(500).await;
+    loop {
+        let ev = embassy_futures::select::select3(
+            sock.read(&mut rbuf),
+            push_ticker.next(),
+            info_ticker.next(),
+        )
+        .await;
+        match ev {
+            embassy_futures::select::Either3::First(r) => match r {
+                Ok(0) | Err(_) => return,
+                Ok(n) => {
+                    out.clear();
+                    step(&mut parser, &rbuf[..n], &mut out, &mut alive);
+                    let _ = sock.write_all(&out).await;
+                    let _ = sock.flush().await;
+                    if !alive {
+                        return;
+                    }
+                }
+            },
+            embassy_futures::select::Either3::Second(_) => {
+                let mut b = heapless::String::<256>::new();
+                build_io_json(&mut b);
+                let _ = sock.write_all(ws_frame_buf(&mut scratch, b.as_bytes())).await;
+                let mut b = heapless::String::<256>::new();
+                build_regs_json(&mut b);
+                let _ = sock.write_all(ws_frame_buf(&mut scratch, b.as_bytes())).await;
+                let _ = sock.flush().await;
+            }
+            embassy_futures::select::Either3::Third(_) => {
+                let mut b = heapless::String::<704>::new();
+                build_info_json(&mut b);
+                let _ = sock.write_all(ws_frame_buf(&mut scratch, b.as_bytes())).await;
+                let _ = sock.flush().await;
+            }
+        }
+    }
+}
+
+/// WS commands (ws_handle_cmd): quick cmds queued as reply frames. The
+/// payload is the full JSON text; "cmd" selects the executor and the
+/// remaining fields are parsed from the same buffer (C passes the slice
+/// from the cmd value onward — same effect).
+fn ws_handle_cmd(out: &mut heapless::Vec<u8, 768>, payload: &[u8]) {
+    let cmd = json_get_str(payload, "cmd").unwrap_or(b"");
+    if cmd == b"do" {
+        if let (Some(i), Some(v)) = (json_get_i32(payload, "index"), json_get_i32(payload, "value")) {
+            if (0..8).contains(&i) && web_write_do_bit(i as u16, v != 0) {
+                // do command answers with the fresh full IO snapshot
+                let mut b = heapless::String::<256>::new();
+                build_io_json(&mut b);
+                ws_queue_frame(out, 0x1, b.as_bytes());
+                return;
+            }
+        }
+        ws_queue_frame(out, 0x1, b"{\"ok\":false,\"err\":\"bad index\"}");
+        return;
+    }
+    if cmd == b"reg" {
+        if let (Some(a), Some(v)) = (json_get_i32(payload, "addr"), json_get_i32(payload, "value")) {
+            let ok = web_cmd_reg(a, v);
+            ws_queue_frame(out, 0x1, if ok { b"{\"ok\":true}" } else { b"{\"ok\":false}" });
+            return;
+        }
+        ws_queue_frame(out, 0x1, b"{\"ok\":false}");
+        return;
+    }
+    if cmd == b"time" {
+        if let Some(ts) = json_get_i32(payload, "ts") {
+            let mut h = Hooks;
+            let ok = h.set_timestamp(ts as u32);
+            ws_queue_frame(out, 0x1, if ok { b"{\"ok\":true}" } else { b"{\"ok\":false}" });
+            return;
+        }
+        ws_queue_frame(out, 0x1, b"{\"ok\":false}");
+        return;
+    }
+    if cmd == b"cfg" {
+        match web_cmd_cfg(payload) {
+            None => ws_queue_frame(out, 0x1, b"{\"ok\":true}"),
+            Some(e) => {
+                let mut b = heapless::String::<96>::new();
+                let _ = write!(&mut b, "{{\"ok\":false,\"err\":\"{}\"}}", e);
+                ws_queue_frame(out, 0x1, b.as_bytes());
+            }
+        }
+        return;
+    }
+    if cmd == b"save" {
+        let mut h = Hooks;
+        h.holding_save();
+        ws_queue_frame(out, 0x1, b"{\"ok\":true}");
+        return;
+    }
+    if cmd == b"factory_reset" {
+        crate::storage::QUEUE
+            .try_send(crate::storage::StorageCmd::CfgEraseAll)
+            .ok();
+        crate::log::inf("factory reset via ws, rebooting");
+        ws_queue_frame(out, 0x1, b"{\"ok\":true}");
+        crate::appstate::set_reboot_status(true);
+        return;
+    }
+    ws_queue_frame(out, 0x1, b"{\"ok\":false,\"err\":\"unknown cmd\"}");
+}
+
 // ==================== JSON builders (web_cmds.c) ====================
 
 fn regs_snapshot() -> RegMap {
@@ -478,16 +834,20 @@ fn build_info_json(out: &mut heapless::String<704>) {
     let r = regs_snapshot();
     let g = |i: usize| r.get_holding(i as u16);
     let mac = crate::net::current_mac();
-    let mac_str = heapless::String::<18>::new();
-    let _ = mac_str; // formatted below via write!
     let link = crate::net::net_link_up();
     let uptime_ms = embassy_time::Instant::now().as_millis() as u64;
+    let (lfs_free, lfs_total) = critical_section::with(|_cs| {
+        crate::storage::FS_SNAP.lock(|s| {
+            let sn = s.borrow();
+            (sn.free, sn.total)
+        })
+    });
     let _ = write!(
         out,
-        "{{\"t\":\"info\",\"version\":\"v{}\",\"build\":\"{}\",\"board\":\"io_edge_f407vet6\",\
+        "{{\"t\":\"info\",\"version\":\"{}\",\"build\":\"{}\",\"board\":\"io_edge_f407vet6\",\
 \"hclk_mhz\":168,\"flash_kb\":512,\"sram_kb\":192,\"mac\":\"{:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x}\",\
 \"ip\":\"{}.{}.{}.{}\",\"slave_id\":{},\"rs485_baud\":{},\"can_id\":{},\"can_baud\":{},\
-\"uptime_ms\":{},\"time\":{},\"hist_en\":{},\"lfs_free\":0,\"lfs_total\":0,\"net_up\":{},\
+\"uptime_ms\":{},\"time\":{},\"hist_en\":{},\"lfs_free\":{},\"lfs_total\":{},\"net_up\":{},\
 \"di_ms\":{},\"ai_ms\":{}}}",
         version::FW_VERSION,
         version::FW_BUILD,
@@ -503,6 +863,8 @@ fn build_info_json(out: &mut heapless::String<704>) {
         uptime_ms,
         systime::now_epoch(),
         g(rm::HOLDING_HISTORY_ENABLE_IDX) != 0,
+        lfs_free,
+        lfs_total,
         link,
         g(rm::HOLDING_DI_SAMPLE_MS_IDX),
         g(rm::HOLDING_AI_SAMPLE_MS_IDX),
