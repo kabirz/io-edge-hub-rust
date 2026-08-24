@@ -202,8 +202,13 @@ pub fn finish(crc: Option<u16>) -> bool {
                 return;
             }
             let tlv_ok = tlv_keyhash_ok();
-            let expect = crc.unwrap_or(0);
-            if crc_v != expect || !tlv_ok {
+            // crc=None (CAN CONFIRM, fw_upg_finish_ex(0,false) parity): skip
+            // the CRC compare — the MCUboot signature is the integrity gate
+            let crc_bad = match crc {
+                Some(expect) => crc_v != expect,
+                None => false,
+            };
+            if crc_bad || !tlv_ok {
                 // full diagnostics: computed/expected crc + tail bytes
                 let mut tail16 = [0u8; 16];
                 let tail_off = total.saturating_sub(16);
@@ -211,7 +216,7 @@ pub fn finish(crc: Option<u16>) -> bool {
                 let mut d = [0u32; 16];
                 d[0] = 5;
                 d[1] = crc_v as u32;
-                d[2] = expect as u32;
+                d[2] = crc.unwrap_or(0) as u32;
                 d[3] = tlv_ok as u32;
                 for (i, w) in tail16.chunks(4).enumerate() {
                     d[8 + i] = u32::from_le_bytes([w[0], w[1], w[2], w[3]]);

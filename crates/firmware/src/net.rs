@@ -348,16 +348,23 @@ async fn udp_task(stack: Stack<'static>) {
         };
         sock.send_to(&rep[..rlen], target).await.ok();
 
-        // reboot contract: reply is on the wire -> flush history -> reboot
+        // reboot contract, io_reboot_cold() parity (udp_task.c): the reply is
+        // on the wire -> flush history -> 100ms -> reset INLINE. This task must
+        // go silent until the reset; a deadline polled in the background leaves
+        // a ~200ms window where GET_VERSION probes still get answered, so a
+        // host polling for "back online" reads the pre-reboot image (stale
+        // uptime) and later traffic dies mid-swap.
         let reboot_now =
             critical_section::with(|_cs| UDP_STATE.lock(|st| st.borrow_mut().take_reboot_pending()));
         if reboot_now {
             crate::log::wrn("udp: delayed reboot");
-            // flush history before the swap reboot (history_sync in udp_task.c)
+            // flush history before the swap reboot (history_sync in udp_task.c);
+            // the 100ms wait below also yields so the storage task can run it
             crate::storage::QUEUE
                 .try_send(crate::storage::StorageCmd::Sync)
                 .ok();
-            crate::reboot::cold();
+            embassy_time::Timer::after_millis(100).await;
+            crate::reboot::system_reset();
         }
     }
 }

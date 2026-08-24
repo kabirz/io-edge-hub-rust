@@ -22,6 +22,7 @@ fn main() {
     let git = Command::new("git")
         .arg("rev-parse")
         .arg("--short=6")
+        .arg("HEAD")
         .current_dir(&root)
         .output();
     let git = match git {

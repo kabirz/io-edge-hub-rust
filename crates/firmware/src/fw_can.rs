@@ -16,8 +16,8 @@ use embassy_stm32::Peri;
 use embassy_stm32::bind_interrupts;
 use embassy_stm32::can::filter::Mask16;
 use embassy_stm32::can::{
-    Can, Fifo, Frame, Id, Rx0InterruptHandler, Rx1InterruptHandler, SceInterruptHandler,
-    StandardId, TxInterruptHandler,
+    BufferedCan, Can, Fifo, Frame, Id, Rx0InterruptHandler, Rx1InterruptHandler,
+    RxBuf, SceInterruptHandler, StandardId, TxInterruptHandler, TxBuf,
 };
 use embassy_stm32::peripherals::{CAN1, PA11, PA12};
 use embassy_time::Timer;
@@ -108,6 +108,17 @@ pub async fn fw_can_task(
     );
 
     can.enable().await;
+
+    // interrupt-fed ring buffers: the 3-deep hardware FIFO overflows during
+    // NOR page writes (~18 ms) when a host bursts 512 B windows, so RX is
+    // drained by the interrupt into a 128-frame ring the task consumes
+    static TXB: static_cell::StaticCell<TxBuf<16>> = static_cell::StaticCell::new();
+    static RXB: static_cell::StaticCell<RxBuf<128>> = static_cell::StaticCell::new();
+    let mut can = can.buffered::<16, 128>(
+        TXB.init(TxBuf::new()),
+        RXB.init(RxBuf::new()),
+    );
+
     let mut msg = heapless::String::<48>::new();
     use core::fmt::Write as _;
     let _ = write!(msg, "fwcan: {}kbps bus id 0x{:03x}", kbps, id);
@@ -142,13 +153,13 @@ pub async fn fw_can_task(
     }
 }
 
-async fn send(can: &mut Can<'static>, id: u16, data: &[u8]) {
+async fn send(can: &mut BufferedCan<'static, 16, 128>, id: u16, data: &[u8]) {
     if let Ok(f) = Frame::new_standard(id, data) {
         let _ = can.write(&f).await;
     }
 }
 
-async fn fw_reply(can: &mut Can<'static>, code: u32, arg: u32) {
+async fn fw_reply(can: &mut BufferedCan<'static, 16, 128>, code: u32, arg: u32) {
     let mut d = [0u8; 8];
     d[..4].copy_from_slice(&code.to_le_bytes());
     d[4..].copy_from_slice(&arg.to_le_bytes());
@@ -156,7 +167,7 @@ async fn fw_reply(can: &mut Can<'static>, code: u32, arg: u32) {
 }
 
 async fn handle_platform(
-    can: &mut Can<'static>,
+    can: &mut BufferedCan<'static, 16, 128>,
     data: &[u8],
     rx_keybuf: &mut [u8; upg::FW_KEYHASH_LEN],
     key_chunk_mask: &mut u8,
@@ -237,7 +248,7 @@ async fn handle_platform(
     }
 }
 
-async fn handle_fw_data(can: &mut Can<'static>, data: &[u8]) {
+async fn handle_fw_data(can: &mut BufferedCan<'static, 16, 128>, data: &[u8]) {
     if !fw::active() {
         crate::log::wrn("fwcan: data before start");
         fw_reply(can, CODE_TRANSFER_ERROR, 0).await;

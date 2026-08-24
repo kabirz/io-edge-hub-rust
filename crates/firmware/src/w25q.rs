@@ -37,6 +37,14 @@ pub struct W25q {
     cs: Output<'static>,
 }
 
+// SAFETY: the driver lives behind storage::NOR (ThreadModeRawMutex). All
+// access is from embassy tasks on the single core through synchronous
+// closures — no await inside — so nothing can observe a mid-transaction
+// state, and no ISR touches the NOR. The Send/Sync impls only satisfy the
+// mutex type system.
+unsafe impl Send for W25q {}
+unsafe impl Sync for W25q {}
+
 pub struct W25qPins {
     pub spi1: embassy_stm32::Peri<'static, embassy_stm32::peripherals::SPI1>,
     pub sck: embassy_stm32::Peri<'static, embassy_stm32::peripherals::PA5>,

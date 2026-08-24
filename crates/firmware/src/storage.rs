@@ -10,7 +10,7 @@ use core::cell::{RefCell, UnsafeCell};
 use core::mem::MaybeUninit;
 
 use embassy_sync::blocking_mutex::Mutex;
-use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
+use embassy_sync::blocking_mutex::raw::{CriticalSectionRawMutex, ThreadModeRawMutex};
 use embassy_sync::channel::Channel;
 use generic_array::typenum::consts::{U1024, U32};
 use littlefs2::driver::Storage;
@@ -250,7 +250,12 @@ pub static FILE_DL: Mutex<CriticalSectionRawMutex, RefCell<FileDl>> = Mutex::new
 /// no stale-signal races (a Signal latches old values and wakes immediately).
 pub static RPC_SEQ: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(0);
 
-pub static NOR: Mutex<CriticalSectionRawMutex, RefCell<Option<W25q>>> =
+/// NOR access is serialized with ThreadModeRawMutex, NOT a critical section:
+/// SPI operations run 10-100+ ms (erase) and masking interrupts that long
+/// drops CAN frames (3-deep FIFO) and W5500 traffic. Sound because all
+/// callers are embassy tasks in thread mode on the single core — the closure
+/// contains no await — and no ISR touches the NOR.
+pub static NOR: Mutex<ThreadModeRawMutex, RefCell<Option<W25q>>> =
     Mutex::new(RefCell::new(None));
 
 /// Active config slot/generation (config_store.c statics).
@@ -258,7 +263,7 @@ pub static CFG: Mutex<CriticalSectionRawMutex, RefCell<(Option<u32>, u32)>> =
     Mutex::new(RefCell::new((None, 0)));
 
 pub fn nor_with<R>(f: impl FnOnce(&mut W25q) -> R) -> Option<R> {
-    critical_section::with(|_cs| NOR.lock(|r| r.borrow_mut().as_mut().map(f)))
+    NOR.lock(|r| r.borrow_mut().as_mut().map(f))
 }
 
 /// littlefs Storage over the shared NOR, offset by LFS_OFFSET. Writes split
