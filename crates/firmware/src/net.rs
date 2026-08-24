@@ -102,6 +102,8 @@ pub async fn setup(spawner: &embassy_executor::Spawner, p: NetPins) -> &'static 
     let bus = SPI_BUS.init(AsyncMutex::new(spi));
     let spi_dev = embassy_embedded_hal::shared_bus::asynch::spi::SpiDevice::new(bus, cs);
 
+    // NOTE: embassy-net-wiznet's SPI DMA transfers directly into State's
+    // packet queues — State must stay in DMA-reachable main RAM (not CCRAM).
     static STATE: StaticCell<embassy_net_wiznet::State<4, 4>> = StaticCell::new();
     let state = STATE.init(embassy_net_wiznet::State::new());
     crate::log::inf("net: spi up, w5500 init");
@@ -143,6 +145,7 @@ pub async fn setup(spawner: &embassy_executor::Spawner, p: NetPins) -> &'static 
     });
 
     // 13 live sockets: udp 1 + mbtcp 3 + httpd 2 + ftp (3x ctrl+data) + ftp rejector
+    #[link_section = ".ccm.bss"]
     static RES: StaticCell<embassy_net::StackResources<16>> = StaticCell::new();
     static STACK: StaticCell<Stack<'static>> = StaticCell::new();
     let (stack, net_runner) = embassy_net::new(
@@ -283,6 +286,53 @@ async fn udp_task(stack: Stack<'static>) {
             rep[13] = (dl.4 >> 16) as u8;
             rep[14] = (dl.4 >> 8) as u8;
             rep[15] = dl.4 as u8;
+            sock.send_to(&rep, meta.endpoint).await.ok();
+            continue;
+        }
+
+        // debug: cmd 0xF5 wipes the littlefs region (maintenance only —
+        // recovers a disk wedged by earlier mid-commit resets). Erases 4K
+        // blocks straight from this task; takes minutes. Device must be
+        // rebooted afterwards (mount formats the blank region).
+        if cmd == 0xF5 {
+            let mut off = crate::storage::LFS_OFFSET;
+            let mut done = 0u32;
+            while off < 0x0100_0000 {
+                crate::storage::nor_with(|w| w.erase(off, 4096));
+                off += 4096;
+                done += 1;
+                embassy_futures::yield_now().await;
+            }
+            let mut rep = [0u8; 8];
+            rep[0] = 0xF5;
+            rep[1] = 1;
+            rep[4] = (done >> 24) as u8;
+            rep[5] = (done >> 16) as u8;
+            rep[6] = (done >> 8) as u8;
+            rep[7] = done as u8;
+            sock.send_to(&rep, meta.endpoint).await.ok();
+            continue;
+        }
+
+        // debug: cmd 0xF7 dumps NOR op counters (storm forensics; survive IWDG)
+        if cmd == 0xF7 {
+            use core::sync::atomic::Ordering::Relaxed;
+            let mut rep = [0u8; 28];
+            rep[0] = 0xF7;
+            let vals = [
+                crate::storage::NOR_NREAD.load(Relaxed),
+                crate::storage::NOR_NWRITE.load(Relaxed),
+                crate::storage::NOR_NERASE.load(Relaxed),
+                crate::storage::NOR_NERR.load(Relaxed),
+                crate::storage::NOR_LASTW.load(Relaxed),
+                crate::storage::NOR_LASTE.load(Relaxed),
+            ];
+            for (i, v) in vals.iter().enumerate() {
+                rep[4 + i * 4] = (v >> 24) as u8;
+                rep[5 + i * 4] = (v >> 16) as u8;
+                rep[6 + i * 4] = (v >> 8) as u8;
+                rep[7 + i * 4] = *v as u8;
+            }
             sock.send_to(&rep, meta.endpoint).await.ok();
             continue;
         }

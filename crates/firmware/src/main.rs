@@ -23,7 +23,6 @@ use embassy_stm32::gpio::{Level, Output, Speed};
 use embassy_stm32::rcc::{self, Hse, HseMode, Pll, PllMul, PllPDiv, PllPreDiv, PllQDiv, PllSource, Sysclk};
 use embassy_stm32::rtc::{Rtc, RtcConfig};
 use embassy_stm32::time::Hertz;
-use embassy_stm32::usart::{Config as UartConfig, Uart};
 use embassy_stm32::wdg::IndependentWatchdog;
 use embassy_stm32::Config as BoardConfig;
 use embassy_time::{Duration, Ticker};
@@ -176,9 +175,13 @@ async fn main(spawner: Spawner) {
 
     // Modbus TCP :502: 2 serving sockets (3rd client finds no listener -> RST,
     // same cap as the C firmware); per-instance buffers from distinct statics
+    #[link_section = ".ccm.bss"]
     static MB_RX1: static_cell::StaticCell<[u8; 512]> = static_cell::StaticCell::new();
+    #[link_section = ".ccm.bss"]
     static MB_TX1: static_cell::StaticCell<[u8; 512]> = static_cell::StaticCell::new();
+    #[link_section = ".ccm.bss"]
     static MB_RX2: static_cell::StaticCell<[u8; 512]> = static_cell::StaticCell::new();
+    #[link_section = ".ccm.bss"]
     static MB_TX2: static_cell::StaticCell<[u8; 512]> = static_cell::StaticCell::new();
     spawner
         .spawn(mbtcp::conn_task(
@@ -207,9 +210,14 @@ async fn main(spawner: Spawner) {
     log::inf("mbtcp: port 502 listening");
 
     // HTTP :80 (2 connections, httpd.c cap); per-instance socket buffers
+    // (CPU-only smoltcp storage -> CCRAM)
+    #[link_section = ".ccm.bss"]
     static HTTP_RX1: static_cell::StaticCell<[u8; 640]> = static_cell::StaticCell::new();
+    #[link_section = ".ccm.bss"]
     static HTTP_TX1: static_cell::StaticCell<[u8; 2048]> = static_cell::StaticCell::new();
+    #[link_section = ".ccm.bss"]
     static HTTP_RX2: static_cell::StaticCell<[u8; 640]> = static_cell::StaticCell::new();
+    #[link_section = ".ccm.bss"]
     static HTTP_TX2: static_cell::StaticCell<[u8; 2048]> = static_cell::StaticCell::new();
     spawner
         .spawn(httpd::http_task(
@@ -227,24 +235,40 @@ async fn main(spawner: Spawner) {
         .expect("spawn http2"));
     log::inf("httpd: port 80 listening");
 
-    // FTP :21 (3 sessions + 421 rejector, ftpd.c cap)
+    // FTP :21 (3 sessions + 421 rejector, ftpd.c cap); the socket buffers
+    // are CPU-only smoltcp storage -> CCRAM (main RAM is scarce)
+    #[link_section = ".ccm.bss"]
     static FR1: static_cell::StaticCell<[u8; 1024]> = static_cell::StaticCell::new();
+    #[link_section = ".ccm.bss"]
     static FT1: static_cell::StaticCell<[u8; 1024]> = static_cell::StaticCell::new();
+    #[link_section = ".ccm.bss"]
     static FDR1: static_cell::StaticCell<[u8; 2048]> = static_cell::StaticCell::new();
+    #[link_section = ".ccm.bss"]
     static FDT1: static_cell::StaticCell<[u8; 2048]> = static_cell::StaticCell::new();
+    #[link_section = ".ccm.bss"]
     static FR2: static_cell::StaticCell<[u8; 1024]> = static_cell::StaticCell::new();
+    #[link_section = ".ccm.bss"]
     static FT2: static_cell::StaticCell<[u8; 1024]> = static_cell::StaticCell::new();
+    #[link_section = ".ccm.bss"]
     static FDR2: static_cell::StaticCell<[u8; 2048]> = static_cell::StaticCell::new();
+    #[link_section = ".ccm.bss"]
     static FDT2: static_cell::StaticCell<[u8; 2048]> = static_cell::StaticCell::new();
+    #[link_section = ".ccm.bss"]
     static FR3: static_cell::StaticCell<[u8; 1024]> = static_cell::StaticCell::new();
+    #[link_section = ".ccm.bss"]
     static FT3: static_cell::StaticCell<[u8; 1024]> = static_cell::StaticCell::new();
+    #[link_section = ".ccm.bss"]
     static FDR3: static_cell::StaticCell<[u8; 2048]> = static_cell::StaticCell::new();
+    #[link_section = ".ccm.bss"]
     static FDT3: static_cell::StaticCell<[u8; 2048]> = static_cell::StaticCell::new();
+    #[link_section = ".ccm.bss"]
     static FRJ: static_cell::StaticCell<[u8; 128]> = static_cell::StaticCell::new();
+    #[link_section = ".ccm.bss"]
     static FTJ: static_cell::StaticCell<[u8; 128]> = static_cell::StaticCell::new();
     spawner
         .spawn(ftpd::ftp_task(
             *stack,
+            0,
             FR1.init([0u8; 1024]),
             FT1.init([0u8; 1024]),
             FDR1.init([0u8; 2048]),
@@ -254,6 +278,7 @@ async fn main(spawner: Spawner) {
     spawner
         .spawn(ftpd::ftp_task(
             *stack,
+            1,
             FR2.init([0u8; 1024]),
             FT2.init([0u8; 1024]),
             FDR2.init([0u8; 2048]),
@@ -263,6 +288,7 @@ async fn main(spawner: Spawner) {
     spawner
         .spawn(ftpd::ftp_task(
             *stack,
+            2,
             FR3.init([0u8; 1024]),
             FT3.init([0u8; 1024]),
             FDR3.init([0u8; 2048]),

@@ -1,6 +1,7 @@
 [workspace]
 resolver = "2"
 members = ["crates/proto", "crates/firmware", "crates/littlefs2-sys"]
+exclude = ["build/lfstest"]
 
 [patch.crates-io]
 littlefs2-sys = { path = "crates/littlefs2-sys" }

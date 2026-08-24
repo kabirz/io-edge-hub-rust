@@ -12,7 +12,7 @@ use embassy_futures::select::{select, Either};
 use embassy_net::tcp::TcpSocket;
 use embassy_net::{IpAddress, IpEndpoint, Ipv4Address, Stack};
 use embassy_time::{Duration, Instant, Timer};
-use embedded_io_async::{Read as _, Write as _};
+use embedded_io_async::Write as _;
 
 use crate::storage::{FtpPath, FtpWrMode, StorageCmd, QUEUE, RPC_SEQ};
 
@@ -26,6 +26,7 @@ static PASV_PORT: AtomicU8 = AtomicU8::new(0);
 #[embassy_executor::task(pool_size = 3)]
 pub async fn ftp_task(
     stack: Stack<'static>,
+    slot: u8,
     crx: &'static mut [u8; 1024],
     ctx: &'static mut [u8; 1024],
     drx: &'static mut [u8; 2048],
@@ -41,7 +42,7 @@ pub async fn ftp_task(
             continue;
         }
         FTP_BUSY.fetch_add(1, Ordering::Relaxed);
-        session(&mut ctrl, &mut data, stack).await;
+        session(&mut ctrl, &mut data, stack, slot).await;
         FTP_BUSY.fetch_sub(1, Ordering::Relaxed);
         ctrl.abort();
         data.abort();
@@ -83,6 +84,8 @@ struct Session {
     port_ep: Option<IpEndpoint>,
     /// chosen PASV port for the next passive transfer
     passive_port: u16,
+    /// storage-task transfer slot (per-session handles for parallel data)
+    slot: u8,
     quit: bool,
 }
 
@@ -92,7 +95,7 @@ async fn send_line(sock: &mut TcpSocket<'static>, msg: &str) {
     let _ = sock.flush().await;
 }
 
-async fn session(ctrl: &mut TcpSocket<'static>, data: &mut TcpSocket<'static>, stack: Stack<'static>) {
+async fn session(ctrl: &mut TcpSocket<'static>, data: &mut TcpSocket<'static>, stack: Stack<'static>, slot: u8) {
     let mut s = Session {
         authed: false,
         anon: false,
@@ -103,6 +106,7 @@ async fn session(ctrl: &mut TcpSocket<'static>, data: &mut TcpSocket<'static>, s
         rename_pending: false,
         port_ep: None,
         passive_port: 0,
+        slot,
         quit: false,
     };
     s.cwd.push('/').ok();
@@ -574,11 +578,11 @@ async fn cmd_retr(ctrl: &mut TcpSocket<'static>, data: &mut TcpSocket<'static>, 
     }
     let fp = norm_path(&s.cwd, arg);
     let rest = s.rest;
-    let seq = rpc_send(StorageCmd::FtpOpenRead { path: ftp_path_bytes(&fp), rest });
+    let seq = rpc_send(StorageCmd::FtpOpenRead { slot: s.slot, path: ftp_path_bytes(&fp), rest });
     let ok = rpc_wait(seq).await && ftp_res().0;
     let size = critical_section::with(|_cs| {
-        crate::storage::FILE_DL.lock(|f| {
-            let g = f.borrow();
+        crate::storage::FTP_XFER[s.slot as usize].lock(|x| {
+            let g = x.borrow();
             (g.size, g.open)
         })
     });
@@ -589,7 +593,7 @@ async fn cmd_retr(ctrl: &mut TcpSocket<'static>, data: &mut TcpSocket<'static>, 
     }
     send_line(ctrl, "150 Opening data connection").await;
     if !open_data(s, data).await {
-        let seq = rpc_send(StorageCmd::FtpCloseWrite); // closes read too via chunk eof path
+        let seq = rpc_send(StorageCmd::FtpCloseWrite(s.slot));
         let _ = seq;
         send_line(ctrl, "425 No data connection").await;
         return;
@@ -597,27 +601,24 @@ async fn cmd_retr(ctrl: &mut TcpSocket<'static>, data: &mut TcpSocket<'static>, 
     // chunked read via the storage RPC; ASCII converts \n -> \r\n
     let mut chunk_ascii = [0u8; 4096];
     loop {
-        let seq = rpc_send(StorageCmd::FileChunk);
+        let seq = rpc_send(StorageCmd::FtpReadChunk(s.slot));
         if !rpc_wait(seq).await {
             break;
         }
         let (chunk, len) = critical_section::with(|_cs| {
-            crate::storage::FILE_DL.lock(|f| {
-                let g = f.borrow();
+            crate::storage::FTP_XFER[s.slot as usize].lock(|x| {
+                let g = x.borrow();
                 let mut c = [0u8; 2048];
                 c[..g.chunk_len].copy_from_slice(&g.chunk[..g.chunk_len]);
                 (c, g.chunk_len)
             })
         });
-        let (eof, err, sent) = critical_section::with(|_cs| {
-            crate::storage::FILE_DL.lock(|f| {
-                let g = f.borrow();
-                (g.eof, g.err, g.sent)
+        let (eof, sent) = critical_section::with(|_cs| {
+            crate::storage::FTP_XFER[s.slot as usize].lock(|x| {
+                let g = x.borrow();
+                (g.eof, g.sent)
             })
         });
-        if err {
-            break;
-        }
         if len > 0 {
             if s.type_ascii {
                 let mut o = 0usize;
@@ -660,7 +661,7 @@ async fn cmd_stor(ctrl: &mut TcpSocket<'static>, data: &mut TcpSocket<'static>, 
     } else {
         FtpWrMode::Trunc
     };
-    let seq = rpc_send(StorageCmd::FtpOpenWrite { path: ftp_path_bytes(&fp), mode });
+    let seq = rpc_send(StorageCmd::FtpOpenWrite { slot: s.slot, path: ftp_path_bytes(&fp), mode });
     let ok = rpc_wait(seq).await && ftp_res().0;
     s.rest = 0;
     if !ok {
@@ -669,7 +670,7 @@ async fn cmd_stor(ctrl: &mut TcpSocket<'static>, data: &mut TcpSocket<'static>, 
     }
     send_line(ctrl, "150 Ok to send data").await;
     if !open_data(s, data).await {
-        let seq = rpc_send(StorageCmd::FtpCloseWrite);
+        let seq = rpc_send(StorageCmd::FtpCloseWrite(s.slot));
         let _ = rpc_wait(seq).await;
         send_line(ctrl, "425 No data connection").await;
         return;
@@ -706,18 +707,18 @@ async fn cmd_stor(ctrl: &mut TcpSocket<'static>, data: &mut TcpSocket<'static>, 
         };
         if wlen > 0 {
             critical_section::with(|_cs| {
-                crate::storage::WBUF.lock(|w| {
-                    let mut g = w.borrow_mut();
-                    g[..wlen].copy_from_slice(&buf[..wlen]);
+                crate::storage::FTP_XFER[s.slot as usize].lock(|x| {
+                    let mut g = x.borrow_mut();
+                    g.chunk[..wlen].copy_from_slice(&buf[..wlen]);
                 })
             });
-            let seq = rpc_send(StorageCmd::FtpWriteChunk(wlen));
+            let seq = rpc_send(StorageCmd::FtpWriteChunk { slot: s.slot, len: wlen });
             if !rpc_wait(seq).await {
                 break;
             }
         }
     }
-    let seq = rpc_send(StorageCmd::FtpCloseWrite);
+    let seq = rpc_send(StorageCmd::FtpCloseWrite(s.slot));
     let _ = rpc_wait(seq).await;
     // graceful FIN on our half (client already closed theirs)
     data.close();

@@ -6,9 +6,12 @@ mod bindings;
 pub use bindings::*;
 
 // minimal libc string functions lfs.c links against (there is no libc in a
-// no_std build; tinyrlibc equivalents, semantics per C99)
+// no_std build; tinyrlibc equivalents, semantics per C99).
+// Only for bare-metal targets — on a host build these clash with the C
+// runtime's own definitions (LNK1169) and libc is available anyway.
 use core::ffi::{c_char, c_int, c_ulong};
 
+#[cfg(target_os = "none")]
 #[no_mangle]
 pub unsafe extern "C" fn strlen(s: *const c_char) -> c_ulong {
     let mut n = 0usize;
@@ -18,6 +21,7 @@ pub unsafe extern "C" fn strlen(s: *const c_char) -> c_ulong {
     n as c_ulong
 }
 
+#[cfg(target_os = "none")]
 #[no_mangle]
 pub unsafe extern "C" fn strchr(s: *const c_char, c: c_int) -> *mut c_char {
     let b = c as u8;
@@ -34,6 +38,7 @@ pub unsafe extern "C" fn strchr(s: *const c_char, c: c_int) -> *mut c_char {
     }
 }
 
+#[cfg(target_os = "none")]
 #[no_mangle]
 pub unsafe extern "C" fn strspn(s: *const c_char, accept: *const c_char) -> c_ulong {
     let mut n = 0usize;
@@ -52,6 +57,7 @@ pub unsafe extern "C" fn strspn(s: *const c_char, accept: *const c_char) -> c_ul
     n as c_ulong
 }
 
+#[cfg(target_os = "none")]
 #[no_mangle]
 pub unsafe extern "C" fn strcspn(s: *const c_char, reject: *const c_char) -> c_ulong {
     let mut n = 0usize;
