@@ -8,6 +8,7 @@
 
 use core::cell::{RefCell, UnsafeCell};
 use core::mem::MaybeUninit;
+use core::sync::atomic::{AtomicBool, Ordering};
 
 use embassy_sync::blocking_mutex::Mutex;
 use embassy_sync::blocking_mutex::raw::{CriticalSectionRawMutex, ThreadModeRawMutex};
@@ -42,6 +43,12 @@ const HIST_FILE_MAX: u32 = 1024 * 1024;
 
 pub type StorageQueue = Channel<CriticalSectionRawMutex, StorageCmd, 8>;
 pub static QUEUE: StorageQueue = Channel::new();
+
+/// Control-command lane (CfgSave / CfgEraseAll): the storage task serves it
+/// with priority, so a burst of history records on [QUEUE] can no longer
+/// fill the queue and silently drop a config save that Modbus/web/shell
+/// already acknowledged ("parameters saved" then lost on reboot).
+pub static CTRL_QUEUE: Channel<CriticalSectionRawMutex, StorageCmd, 4> = Channel::new();
 
 pub enum StorageCmd {
     Write(HisData),
@@ -135,19 +142,49 @@ static OPEN_FILE: Mutex<CriticalSectionRawMutex, RefCell<Option<OpenFile>>> =
 /// File-cache allocation with a stable address (littlefs embeds the buffer
 /// pointer into the open lfs_file_t: the holder must never move while a
 /// file is open, so the allocation lives here, outside OPEN_FILE).
-struct AllocCell(UnsafeCell<MaybeUninit<FileAllocation<LfsNor>>>);
+struct AllocCell {
+    cell: UnsafeCell<MaybeUninit<FileAllocation<LfsNor>>>,
+    /// explicit init marker — the old "is the cell still zero" guard
+    /// compared the cell's ADDRESS (never 0), so it never fired and
+    /// correctness rested on FileAllocation::new() happening to be all-zero
+    init: AtomicBool,
+}
 unsafe impl Sync for AllocCell {}
-static FILE_ALLOC: AllocCell = AllocCell(UnsafeCell::new(MaybeUninit::zeroed()));
-static DL_ALLOC: AllocCell = AllocCell(UnsafeCell::new(MaybeUninit::zeroed()));
+impl AllocCell {
+    const fn new() -> Self {
+        Self { cell: UnsafeCell::new(MaybeUninit::zeroed()), init: AtomicBool::new(false) }
+    }
+}
+static FILE_ALLOC: AllocCell = AllocCell::new();
+static DL_ALLOC: AllocCell = AllocCell::new();
 
 /// Init once from the storage task; returns the stable &'static mut.
 unsafe fn alloc_get(cell: &AllocCell) -> &'static mut FileAllocation<LfsNor> {
-    // the cell is zeroed until first use; FileAllocation::new is not const
-    let p = cell.0.get();
-    if (*p).assume_init_ref() as *const _ as usize == 0 {
+    let p = cell.cell.get();
+    if !cell.init.load(Ordering::Relaxed) {
         (*p).write(FileAllocation::new());
+        cell.init.store(true, Ordering::Relaxed);
     }
     (*p).assume_init_mut()
+}
+
+/// A failed littlefs close leaves the file node linked in the fs mlist;
+/// reusing its alloc cell then self-cycles the node and the next commit's
+/// mlist walk spins forever (wedging the storage task AND every queued
+/// CfgSave). Fence instead: once FS_BAD is set all opens are refused until
+/// reboot — failing beats hanging.
+pub static FS_BAD: AtomicBool = AtomicBool::new(false);
+
+/// Close and poison the fs on failure. Returns the close result.
+unsafe fn close_or_poison(f: File<'static, 'static, LfsNor>) -> bool {
+    match f.close() {
+        Ok(_) => true,
+        Err(_) => {
+            FS_BAD.store(true, Ordering::Relaxed);
+            crate::log::err("lfs: close failed, storage fenced until reboot");
+            false
+        }
+    }
 }
 
 /// Persistent download handle (chunked reads continue sequentially — no
@@ -166,6 +203,8 @@ pub struct FtpXfer {
     pub chunk: [u8; 2048],
     pub chunk_len: usize,
     pub eof: bool,
+    pub err: bool,  // RETR: mid-transfer read failure (not a clean EOF)
+    pub werr: bool, // STOR/APPE: a chunk write or the final close failed
     pub open: bool,
     pub wpos: usize, // write staging fill level
 }
@@ -184,6 +223,8 @@ pub static FTP_XFER: [Mutex<CriticalSectionRawMutex, RefCell<FtpXfer>>; 3] = [
         chunk: [0; 2048],
         chunk_len: 0,
         eof: false,
+        err: false,
+        werr: false,
         open: false,
         wpos: 0,
     })),
@@ -195,6 +236,8 @@ pub static FTP_XFER: [Mutex<CriticalSectionRawMutex, RefCell<FtpXfer>>; 3] = [
         chunk: [0; 2048],
         chunk_len: 0,
         eof: false,
+        err: false,
+        werr: false,
         open: false,
         wpos: 0,
     })),
@@ -206,15 +249,13 @@ pub static FTP_XFER: [Mutex<CriticalSectionRawMutex, RefCell<FtpXfer>>; 3] = [
         chunk: [0; 2048],
         chunk_len: 0,
         eof: false,
+        err: false,
+        werr: false,
         open: false,
         wpos: 0,
     })),
 ];
-static FTP_ALLOC: [AllocCell; 3] = [
-    AllocCell(UnsafeCell::new(MaybeUninit::zeroed())),
-    AllocCell(UnsafeCell::new(MaybeUninit::zeroed())),
-    AllocCell(UnsafeCell::new(MaybeUninit::zeroed())),
-];
+static FTP_ALLOC: [AllocCell; 3] = [AllocCell::new(), AllocCell::new(), AllocCell::new()];
 
 /// FTP write handle (STOR/APPE): persistent like the history file.
 pub(crate) struct WrFile(Option<File<'static, 'static, LfsNor>>);
@@ -500,7 +541,7 @@ fn hist_write(fs: &mut Filesystem<'_, LfsNor>, st: &mut HistState, d: &HisData) 
     if rotated {
         if let Some(f) = file {
             unsafe {
-                let _ = f.close(); // NOR sync outside the cs
+                close_or_poison(f); // NOR sync outside the cs
             }
         }
     }
@@ -697,7 +738,24 @@ pub async fn storage_task() {
     let fs: &'static mut Filesystem<'static, LfsNor> = unsafe { core::mem::transmute(&mut fs) };
     let mut st = HistState::new();
     loop {
-        match QUEUE.receive().await {
+        // both lanes polled concurrently; when both are ready the executor
+        // may pick either, but a full QUEUE can no longer block control cmds
+        let cmd = match embassy_futures::select::select(
+            CTRL_QUEUE.receive(),
+            QUEUE.receive(),
+        )
+        .await
+        {
+            embassy_futures::select::Either::First(c) => c,
+            embassy_futures::select::Either::Second(c) => c,
+        };
+        handle_cmd(fs, &mut st, cmd);
+    }
+}
+
+fn handle_cmd(fs: &mut Filesystem<'static, LfsNor>, st: &mut HistState, cmd: StorageCmd) {
+    {
+        match cmd {
             StorageCmd::Write(d) => {
                 let enabled = critical_section::with(|_cs| {
                     REGS.lock(|r| r.borrow().get_holding(HOLDING_HISTORY_ENABLE_IDX as u16) != 0)
@@ -706,27 +764,22 @@ pub async fn storage_task() {
                 // littlefs rotation erases freeze IRQs for seconds and the
                 // W5500 MACRAW buffer drops the upgrade window bursts (the C
                 // box blocked here on the flash lock instead, keeping net up)
-                if enabled && !crate::fw::active() {
-                    hist_write(&mut *fs, &mut st, &d);
+                if enabled && !crate::fw::active() && !FS_BAD.load(Ordering::Relaxed) {
+                    hist_write(&mut *fs, st, &d);
                 }
             }
             // per-op open/write/close already persists each record; the
             // disable/enable file-continuation semantic is carried by st's
             // retained name, so these are bookkeeping no-ops by design
             StorageCmd::CloseKeepName => {
-                critical_section::with(|_cs| {
-                    OPEN_FILE.lock(|o| {
-                        if let Some(mut g) = o.borrow_mut().take() {
-                            if let Some(f) = g.file.take() {
-                                unsafe {
-                                    let _ = f.close();
-                                }
-                            }
-                        }
-                        // put the (now file-less) holder back
-                        *o.borrow_mut() = Some(OpenFile { file: None });
-                    })
+                // take the handle out, close OUTSIDE the cs (a close can
+                // sync NOR for ms); the holder stays in place, file-less
+                let f = critical_section::with(|_cs| {
+                    OPEN_FILE.lock(|o| o.borrow_mut().as_mut().and_then(|h| h.file.take()))
                 });
+                if let Some(f) = f {
+                    unsafe { close_or_poison(f) };
+                }
             }
             StorageCmd::Sync => {
                 hist_sync();
@@ -911,15 +964,15 @@ fn slot_close_all(slot: u8) {
         })
     });
     for f in [dl, wr].into_iter().flatten() {
-        unsafe {
-            let _ = f.close();
-        }
+        unsafe { close_or_poison(f) };
     }
     critical_section::with(|_cs| {
         FTP_XFER[slot].lock(|x| {
             let mut g = x.borrow_mut();
             g.open = false;
             g.eof = false;
+            g.err = false;
+            g.werr = false;
             g.size = 0;
             g.sent = 0;
             g.chunk_len = 0;
@@ -933,6 +986,9 @@ fn ftp_open_read(fs: &mut Filesystem<'_, LfsNor>, slot: u8, path: FtpPath, rest:
     let slot = (slot as usize).min(2);
     // close any stale handles (dl AND wr) so the alloc cell is unlinked
     slot_close_all(slot as u8);
+    if FS_BAD.load(Ordering::Relaxed) {
+        return false;
+    }
     let p = match ftp_path_of(&path) {
         Some(p) => p,
         None => return false,
@@ -947,7 +1003,7 @@ fn ftp_open_read(fs: &mut Filesystem<'_, LfsNor>, slot: u8, path: FtpPath, rest:
             if rest > 0 {
                 if file.seek(lfs_io::SeekFrom::Start(rest)).is_err() {
                     unsafe {
-                        let _ = file.close();
+                        close_or_poison(file);
                     }
                     return false;
                 }
@@ -971,6 +1027,12 @@ fn ftp_open_write(fs: &mut Filesystem<'_, LfsNor>, slot: u8, path: FtpPath, mode
     // close any stale handles (wr AND dl) so the alloc cell is unlinked
     slot_close_all(slot);
     let slot = (slot as usize).min(2);
+    if FS_BAD.load(Ordering::Relaxed) {
+        critical_section::with(|_cs| {
+            FTP_RES.lock(|r| *r.borrow_mut() = (false, false, 0));
+        });
+        return;
+    }
     let p = match ftp_path_of(&path) {
         Some(p) => p,
         None => {
@@ -1009,7 +1071,7 @@ fn ftp_open_write(fs: &mut Filesystem<'_, LfsNor>, slot: u8, path: FtpPath, mode
                 true
             } else {
                 unsafe {
-                    let _ = file.close();
+                    close_or_poison(file);
                 }
                 false
             }
@@ -1036,33 +1098,43 @@ fn ftp_write_chunk(slot: u8, len: usize) {
             g.wr.0.take()
         })
     });
-    let mut n = 0;
+    // propagate write failure into werr: ftpd checks it and fails the
+    // transfer instead of answering 226 over a truncated file
+    let mut ok = true;
     if let Some(f) = file.as_mut() {
-        n = f.write(&buf[..l]).unwrap_or(0);
+        match f.write(&buf[..l]) {
+            Ok(n) => ok = n == l,
+            Err(_) => ok = false,
+        }
     }
     critical_section::with(|_cs| {
         FTP_XFER[slot].lock(|x| {
-            x.borrow_mut().wr.0 = file;
+            let mut g = x.borrow_mut();
+            if !ok {
+                g.werr = true;
+            }
+            g.wr.0 = file;
         })
     });
 }
 
-fn ftp_close_write_quiet(slot: u8) {
+fn ftp_close_write_quiet(slot: u8) -> bool {
     let slot = (slot as usize).min(2);
     let file = critical_section::with(|_cs| {
         FTP_XFER[slot].lock(|x| x.borrow_mut().wr.0.take())
     });
-    if let Some(f) = file {
-        unsafe {
-            let _ = f.close(); // NOR sync outside the cs (see ftp_write_chunk)
-        }
+    match file {
+        Some(f) => unsafe { close_or_poison(f) }, // NOR sync outside the cs
+        None => true,
     }
 }
 
 fn ftp_close_write(slot: u8) {
-    ftp_close_write_quiet(slot);
+    let slot = (slot as usize).min(2);
+    let ok = ftp_close_write_quiet(slot as u8);
+    let werr = critical_section::with(|_cs| FTP_XFER[slot].lock(|x| x.borrow().werr));
     critical_section::with(|_cs| {
-        FTP_RES.lock(|r| *r.borrow_mut() = (true, false, 0));
+        FTP_RES.lock(|r| *r.borrow_mut() = (ok && !werr, false, 0));
     });
 }
 
@@ -1083,9 +1155,7 @@ fn ftp_read_chunk(_fs: &mut Filesystem<'_, LfsNor>, slot: u8) {
             FTP_XFER[slot].lock(|x| x.borrow_mut().dl.0.take())
         });
         if let Some(f) = f {
-            unsafe {
-                let _ = f.close(); // NOR sync outside the cs
-            }
+            unsafe { close_or_poison(f) }; // NOR sync outside the cs
         }
         critical_section::with(|_cs| {
             FTP_XFER[slot].lock(|x| x.borrow_mut().eof = true)
@@ -1112,12 +1182,18 @@ fn ftp_read_chunk(_fs: &mut Filesystem<'_, LfsNor>, slot: u8) {
             FTP_XFER[slot].lock(|x| x.borrow_mut().dl.0.take())
         });
         if let Some(f) = f {
-            unsafe {
-                let _ = f.close();
-            }
+            unsafe { close_or_poison(f) };
         }
         critical_section::with(|_cs| {
-            FTP_XFER[slot].lock(|x| x.borrow_mut().eof = true)
+            FTP_XFER[slot].lock(|x| {
+                let mut g = x.borrow_mut();
+                g.eof = true;
+                // short read before the expected size = transfer error, not
+                // a clean EOF — ftpd answers 426 instead of a fake 226
+                if g.sent < g.size {
+                    g.err = true;
+                }
+            })
         });
         return;
     }
@@ -1211,15 +1287,12 @@ fn fs_snapshot(fs: &mut Filesystem<'_, LfsNor>) -> bool {
 /// file once; FileChunk reads continue sequentially from the handle.
 fn file_open(fs: &mut Filesystem<'_, LfsNor>, name: &[u8; 24]) -> bool {
     // close any stale handle first
-    critical_section::with(|_cs| {
-        DOWNLOAD_FILE.lock(|d| {
-            if let Some(f) = d.borrow_mut().0.take() {
-                unsafe {
-                    let _ = f.close();
-                }
-            }
-        })
+    let stale = critical_section::with(|_cs| {
+        DOWNLOAD_FILE.lock(|d| d.borrow_mut().0.take())
     });
+    if let Some(f) = stale {
+        unsafe { close_or_poison(f) };
+    }
     critical_section::with(|_cs| {
         FILE_DL.lock(|f| {
             let mut g = f.borrow_mut();
@@ -1231,6 +1304,9 @@ fn file_open(fs: &mut Filesystem<'_, LfsNor>, name: &[u8; 24]) -> bool {
             g.chunk_len = 0;
         })
     });
+    if FS_BAD.load(Ordering::Relaxed) {
+        return false;
+    }
     let path = match path_of(name) {
         Some(p) => p,
         None => return false,
@@ -1275,49 +1351,39 @@ fn file_chunk(_fs: &mut Filesystem<'_, LfsNor>) -> bool {
             FILE_DL.lock(|f| f.borrow_mut().eof = true)
         });
         // close the finished handle
-        critical_section::with(|_cs| {
-            DOWNLOAD_FILE.lock(|d| {
-                if let Some(f) = d.borrow_mut().0.take() {
-                    unsafe {
-                        let _ = f.close();
-                    }
-                }
-            })
+        let f = critical_section::with(|_cs| {
+            DOWNLOAD_FILE.lock(|d| d.borrow_mut().0.take())
         });
+        if let Some(f) = f {
+            unsafe { close_or_poison(f) };
+        }
         return true;
     }
+    // littlefs read runs with the handle taken OUT of the critical section —
+    // a read touches NOR for ~ms and must not mask interrupts (CAN frames!)
     let mut buf = [0u8; 2048];
-    let n = critical_section::with(|_cs| {
-        DOWNLOAD_FILE.lock(|d| {
-            let mut g = d.borrow_mut();
-            match g.0.as_mut() {
-                Some(file) => file.read(&mut buf).unwrap_or(0),
-                None => {
-                    g.0.take(); // no handle: error
-                    0
-                }
-            }
-        })
+    let mut file = critical_section::with(|_cs| {
+        DOWNLOAD_FILE.lock(|d| d.borrow_mut().0.take())
     });
-    let n = if n == 0 { 0 } else { n };
+    let mut n = 0;
+    if let Some(f) = file.as_mut() {
+        n = f.read(&mut buf).unwrap_or(0);
+    }
     if n == 0 {
+        if let Some(f) = file {
+            unsafe { close_or_poison(f) };
+        }
         critical_section::with(|_cs| {
             FILE_DL.lock(|f| {
                 f.borrow_mut().err = true;
                 f.borrow_mut().eof = true;
             })
         });
-        critical_section::with(|_cs| {
-            DOWNLOAD_FILE.lock(|d| {
-                if let Some(f) = d.borrow_mut().0.take() {
-                    unsafe {
-                        let _ = f.close();
-                    }
-                }
-            })
-        });
         return false;
     }
+    critical_section::with(|_cs| {
+        DOWNLOAD_FILE.lock(|d| d.borrow_mut().0 = file)
+    });
     critical_section::with(|_cs| {
         FILE_DL.lock(|f| {
             let mut g = f.borrow_mut();
@@ -1337,15 +1403,12 @@ fn file_chunk(_fs: &mut Filesystem<'_, LfsNor>) -> bool {
         })
     });
     if done {
-        critical_section::with(|_cs| {
-            DOWNLOAD_FILE.lock(|d| {
-                if let Some(f) = d.borrow_mut().0.take() {
-                    unsafe {
-                        let _ = f.close();
-                    }
-                }
-            })
+        let f = critical_section::with(|_cs| {
+            DOWNLOAD_FILE.lock(|d| d.borrow_mut().0.take())
         });
+        if let Some(f) = f {
+            unsafe { close_or_poison(f) };
+        }
     }
     true
 }

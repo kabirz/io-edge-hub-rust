@@ -217,7 +217,9 @@ fn fmt_ls_time(name: &str) -> heapless::String<20> {
         "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
     ];
     let b = name.as_bytes();
-    if b.len() >= 13 && &b[..5] == b"data_" {
+    // two(12) reads b[12..14], so the guard must cover 14 bytes — a 13-byte
+    // "data_..." name used to slip past a >= 13 check and panic the slice
+    if b.len() >= 14 && &b[..5] == b"data_" {
         let two = |i: usize| -> Option<u32> {
             core::str::from_utf8(&b[i..i + 2]).ok()?.parse().ok()
         };
@@ -378,10 +380,16 @@ async fn handle_command(
         "RETR" => cmd_retr(ctrl, data, s, arg).await,
         "STOR" | "APPE" => cmd_stor(ctrl, data, s, arg, cmd == "APPE").await,
         "DELE" | "RMD" | "XRMD" => {
+            // auth BEFORE queueing the RPC: the storage task executes every
+            // queued command, a post-hoc check only changed the reply while
+            // an anonymous session could still delete files / make dirs
+            if !s.authed || s.anon {
+                send_line(ctrl, "550 Permission denied").await;
+                return;
+            }
             let fp = norm_path(&s.cwd, arg);
-            let can = s.authed && !s.anon;
             let seq = rpc_send(StorageCmd::FtpRemove(ftp_path_bytes(&fp)));
-            let (ok, _, _) = if rpc_wait(seq).await && can {
+            let (ok, _, _) = if rpc_wait(seq).await {
                 ftp_res()
             } else {
                 (false, false, 0)
@@ -396,9 +404,13 @@ async fn handle_command(
             send_line(ctrl, msg).await;
         }
         "MKD" | "XMKD" => {
+            if !s.authed || s.anon {
+                send_line(ctrl, "550 Permission denied").await;
+                return;
+            }
             let fp = norm_path(&s.cwd, arg);
             let seq = rpc_send(StorageCmd::FtpMkdir(ftp_path_bytes(&fp)));
-            let (ok, _, _) = if rpc_wait(seq).await && s.authed && !s.anon {
+            let (ok, _, _) = if rpc_wait(seq).await {
                 ftp_res()
             } else {
                 (false, false, 0)
@@ -481,10 +493,17 @@ fn local_ip() -> [u8; 4] {
 }
 
 fn parse_port_arg(arg: &str) -> Option<IpEndpoint> {
-    let vals: heapless::Vec<u16, 6> = arg
-        .split(',')
-        .map(|p| p.parse::<u16>().ok())
-        .collect::<Option<_>>()?;
+    // iterator parse: no collect (a heapless Vec::collect panics on overflow
+    // with more parts than capacity, and indexing assumed exactly 6)
+    let mut vals = [0u16; 6];
+    let mut it = arg.split(',');
+    for v in vals.iter_mut() {
+        *v = it.next()?.parse().ok()?;
+    }
+    // a trailing empty part (trailing comma) is tolerated, extra data is not
+    if it.next().is_some_and(|s| !s.is_empty()) {
+        return None;
+    }
     if vals.iter().any(|&v| v > 255) {
         return None;
     }
@@ -505,13 +524,21 @@ fn parse_eprt_arg(arg: &str) -> Option<IpEndpoint> {
     let proto: u32 = it.next()?.parse().ok()?;
     let ip = it.next()?;
     let port: u16 = it.next()?.parse().ok()?;
+    // trailing delimiter is standard ("|1|ip|port|"), extra data is not
+    if it.next().is_some_and(|s| !s.is_empty()) {
+        return None;
+    }
     if proto != 1 || port == 0 {
         return None;
     }
-    let a: heapless::Vec<u8, 4> = ip
-        .split('.')
-        .map(|p| p.parse::<u8>().ok())
-        .collect::<Option<_>>()?;
+    let mut a = [0u8; 4];
+    let mut iit = ip.split('.');
+    for v in a.iter_mut() {
+        *v = iit.next()?.parse().ok()?;
+    }
+    if iit.next().is_some() {
+        return None;
+    }
     Some(IpEndpoint {
         addr: IpAddress::Ipv4(Ipv4Address::new(a[0], a[1], a[2], a[3])),
         port,
@@ -649,10 +676,17 @@ async fn cmd_retr(ctrl: &mut TcpSocket<'static>, data: &mut TcpSocket<'static>, 
             break;
         }
     }
+    let xfer_err = critical_section::with(|_cs| {
+        crate::storage::FTP_XFER[s.slot as usize].lock(|x| x.borrow().err)
+    });
     let _ = data.flush().await;
     // graceful FIN: the client's recv must see EOF, not RST
     data.close();
-    send_line(ctrl, "226 Transfer complete").await;
+    if xfer_err {
+        send_line(ctrl, "426 Transfer aborted: read error").await;
+    } else {
+        send_line(ctrl, "226 Transfer complete").await;
+    }
 }
 
 async fn cmd_stor(ctrl: &mut TcpSocket<'static>, data: &mut TcpSocket<'static>, s: &mut Session, arg: &str, is_appe: bool) {
@@ -684,6 +718,7 @@ async fn cmd_stor(ctrl: &mut TcpSocket<'static>, data: &mut TcpSocket<'static>, 
     }
     let mut buf = [0u8; 512];
     let mut pending_cr = false;
+    let mut xfer_err = false;
     loop {
         let n = match data.read(&mut buf).await {
             Ok(0) | Err(_) => break,
@@ -721,13 +756,25 @@ async fn cmd_stor(ctrl: &mut TcpSocket<'static>, data: &mut TcpSocket<'static>, 
             });
             let seq = rpc_send(StorageCmd::FtpWriteChunk { slot: s.slot, len: wlen });
             if !rpc_wait(seq).await {
+                xfer_err = true; // storage task wedged mid-transfer
+                break;
+            }
+            let werr = critical_section::with(|_cs| {
+                crate::storage::FTP_XFER[s.slot as usize].lock(|x| x.borrow().werr)
+            });
+            if werr {
+                xfer_err = true;
                 break;
             }
         }
     }
     let seq = rpc_send(StorageCmd::FtpCloseWrite(s.slot));
-    let _ = rpc_wait(seq).await;
+    let close_ok = rpc_wait(seq).await && ftp_res().0;
     // graceful FIN on our half (client already closed theirs)
     data.close();
-    send_line(ctrl, "226 Transfer complete").await;
+    if xfer_err || !close_ok {
+        send_line(ctrl, "451 Requested action aborted: local error").await;
+    } else {
+        send_line(ctrl, "226 Transfer complete").await;
+    }
 }

@@ -64,7 +64,10 @@ pub fn init() {
         DMA2_ST2_CR.write_volatile(0);
         DMA2_ST2_FCR.write_volatile(0); // direct mode, no FIFO
         DMA2_ST2_PAR.write_volatile(USART1_DR as u32);
-        DMA2_ST2_M0AR.write_volatile(RX_BUF.as_ptr() as u32);
+        // addr_of_mut!, not RX_BUF.as_ptr(): a shared reference to a
+        // `static mut` is UB-adjacent (static_mut_refs lint) and a hard
+        // error under edition 2024
+        DMA2_ST2_M0AR.write_volatile(core::ptr::addr_of_mut!(RX_BUF) as u32);
         DMA2_ST2_NDTR.write_volatile(RX_RING as u32);
         DMA2_ST2_CR.write_volatile(
             DMA_SxCR_CHSEL_4 | DMA_SxCR_MSIZ_8 | DMA_SxCR_PSIZ_8 | DMA_SxCR_MINC | DMA_SxCR_CIRC | DMA_SxCR_EN,
@@ -94,6 +97,8 @@ pub fn rx_available(tail: usize) -> usize {
 }
 
 /// Read one byte at `tail` position (caller advances tail mod RX_RING).
+/// Volatile: the DMA engine writes RX_BUF concurrently (single-byte reads
+/// are atomic on Cortex-M; volatile keeps the compiler from caching it).
 pub fn rx_peek(tail: usize) -> u8 {
-    unsafe { RX_BUF[tail % RX_RING] }
+    unsafe { core::ptr::read_volatile(core::ptr::addr_of!(RX_BUF[tail % RX_RING])) }
 }

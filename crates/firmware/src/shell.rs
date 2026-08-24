@@ -795,7 +795,9 @@ fn io_dispatch(args: &[&str]) {
             reg_write((rm::HOLDING_IP_OCTET1_IDX + 1) as u16, ip[1] as u16);
             reg_write((rm::HOLDING_IP_OCTET1_IDX + 2) as u16, ip[2] as u16);
             reg_write((rm::HOLDING_IP_OCTET1_IDX + 3) as u16, ip[3] as u16);
-            crate::storage::QUEUE.try_send(crate::storage::StorageCmd::CfgSave).ok();
+            crate::storage::CTRL_QUEUE
+                .try_send(crate::storage::StorageCmd::CfgSave)
+                .ok();
             let mut s = heapless::String::<64>::new();
             let _ = core::fmt::write(
                 &mut s,
@@ -805,11 +807,13 @@ fn io_dispatch(args: &[&str]) {
         }
         "reg" => cmd_io_reg(&args[1..]),
         "save" => {
-            crate::storage::QUEUE.try_send(crate::storage::StorageCmd::CfgSave).ok();
+            crate::storage::CTRL_QUEUE
+                .try_send(crate::storage::StorageCmd::CfgSave)
+                .ok();
             log::line("parameters saved");
         }
         "factory" => {
-            crate::storage::QUEUE
+            crate::storage::CTRL_QUEUE
                 .try_send(crate::storage::StorageCmd::CfgEraseAll)
                 .ok();
             crate::appstate::set_reboot_status(true);

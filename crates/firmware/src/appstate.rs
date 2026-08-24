@@ -80,7 +80,11 @@ impl RegHooks for Hooks {
     }
 
     fn holding_save(&mut self) {
-        crate::storage::QUEUE.try_send(crate::storage::StorageCmd::CfgSave).ok();
+        // control lane: a full history QUEUE must not drop a config save
+        // that was already acknowledged to the client
+        crate::storage::CTRL_QUEUE
+            .try_send(crate::storage::StorageCmd::CfgSave)
+            .ok();
     }
 
     fn history_enable_write(&mut self, en: bool) {
@@ -109,7 +113,7 @@ pub struct Cfg;
 
 impl CfgHooks for Cfg {
     fn config_erase_all(&mut self) {
-        crate::storage::QUEUE
+        crate::storage::CTRL_QUEUE
             .try_send(crate::storage::StorageCmd::CfgEraseAll)
             .ok();
     }

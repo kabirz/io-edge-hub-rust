@@ -290,30 +290,6 @@ async fn udp_task(stack: Stack<'static>) {
             continue;
         }
 
-        // debug: cmd 0xF5 wipes the littlefs region (maintenance only —
-        // recovers a disk wedged by earlier mid-commit resets). Erases 4K
-        // blocks straight from this task; takes minutes. Device must be
-        // rebooted afterwards (mount formats the blank region).
-        if cmd == 0xF5 {
-            let mut off = crate::storage::LFS_OFFSET;
-            let mut done = 0u32;
-            while off < 0x0100_0000 {
-                crate::storage::nor_with(|w| w.erase(off, 4096));
-                off += 4096;
-                done += 1;
-                embassy_futures::yield_now().await;
-            }
-            let mut rep = [0u8; 8];
-            rep[0] = 0xF5;
-            rep[1] = 1;
-            rep[4] = (done >> 24) as u8;
-            rep[5] = (done >> 16) as u8;
-            rep[6] = (done >> 8) as u8;
-            rep[7] = done as u8;
-            sock.send_to(&rep, meta.endpoint).await.ok();
-            continue;
-        }
-
         let rlen = critical_section::with(|_cs| {
             REGS.lock(|r| {
                 UDP_STATE.lock(|st| {

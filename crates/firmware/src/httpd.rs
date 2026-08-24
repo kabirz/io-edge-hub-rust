@@ -830,7 +830,7 @@ fn ws_handle_cmd(out: &mut heapless::Vec<u8, 768>, payload: &[u8], fw_crc: &mut 
         return;
     }
     if cmd == b"factory_reset" {
-        crate::storage::QUEUE
+        crate::storage::CTRL_QUEUE
             .try_send(crate::storage::StorageCmd::CfgEraseAll)
             .ok();
         crate::log::inf("factory reset via ws, rebooting");
