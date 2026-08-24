@@ -10,8 +10,8 @@
 
 use core::cell::RefCell;
 
+use embassy_sync::blocking_mutex::raw::ThreadModeRawMutex;
 use embassy_sync::blocking_mutex::Mutex;
-use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
 use io_edge_hub_proto::fw_upg as upg;
 
 use crate::storage::nor_with;
@@ -30,26 +30,29 @@ struct FwSession {
     page_len: usize,
 }
 
-static FW: Mutex<CriticalSectionRawMutex, RefCell<FwSession>> = Mutex::new(RefCell::new(
-    FwSession {
-        active: false,
-        failed: false,
-        total: 0,
-        written: 0,
-        page: [0; PAGE_SZ],
-        page_len: 0,
-    },
-));
+// ThreadModeRawMutex, NOT a critical section (same reasoning as storage::NOR):
+// write()/start()/finish() run NOR page programs (0.4-3 ms), a whole-slot
+// erase (~2 s) and a full-image readback inside the lock — masking interrupts
+// that long overruns the 3-deep bxCAN RX FIFO at full bus speed and drops
+// ~3 frames per 256 B page. Sound because every caller is an embassy task in
+// thread mode, the closures hold no await (no interleaving), and no ISR
+// touches this state.
+static FW: Mutex<ThreadModeRawMutex, RefCell<FwSession>> = Mutex::new(RefCell::new(FwSession {
+    active: false,
+    failed: false,
+    total: 0,
+    written: 0,
+    page: [0; PAGE_SZ],
+    page_len: 0,
+}));
 
 /// Last finish() diagnostics (UDP debug cmd 0xFB): written/computed crc/
 /// expected crc/tlv ok + first and last 16 readback bytes.
-pub static FW_DBG: Mutex<CriticalSectionRawMutex, RefCell<[u32; 16]>> =
+pub static FW_DBG: Mutex<ThreadModeRawMutex, RefCell<[u32; 16]>> =
     Mutex::new(RefCell::new([0; 16]));
 
 fn dbg_store(vals: &[u32; 16]) {
-    critical_section::with(|_cs| {
-        FW_DBG.lock(|d| *d.borrow_mut() = *vals);
-    });
+    FW_DBG.lock(|d| *d.borrow_mut() = *vals);
 }
 
 fn page_flush(s: &mut FwSession) -> bool {
@@ -73,77 +76,71 @@ fn erase_slot1() -> bool {
 
 pub fn start(total: u32, keyhash: Option<&[u8; upg::FW_KEYHASH_LEN]>) -> i32 {
     let mut rc = 0i32;
-    critical_section::with(|_cs| {
-        FW.lock(|f| {
-            let mut s = f.borrow_mut();
-            if s.active {
-                rc = -3;
+    FW.lock(|f| {
+        let mut s = f.borrow_mut();
+        if s.active {
+            rc = -3;
+            return;
+        }
+        if total < 64 || total > upg::SLOT1_SIZE {
+            rc = -1;
+            return;
+        }
+        if let Some(kh) = keyhash {
+            if kh != &upg::FW_KEYHASH {
+                rc = -2;
                 return;
             }
-            if total < 64 || total > upg::SLOT1_SIZE {
-                rc = -1;
-                return;
-            }
-            if let Some(kh) = keyhash {
-                if kh != &upg::FW_KEYHASH {
-                    rc = -2;
-                    return;
-                }
-            }
-            if !erase_slot1() {
-                rc = -1;
-                return;
-            }
-            s.active = true;
-            s.failed = false;
-            s.total = total;
-            s.written = 0;
-            s.page_len = 0;
-        })
+        }
+        if !erase_slot1() {
+            rc = -1;
+            return;
+        }
+        s.active = true;
+        s.failed = false;
+        s.total = total;
+        s.written = 0;
+        s.page_len = 0;
     });
     rc
 }
 
 pub fn write(data: &[u8]) -> bool {
-    critical_section::with(|_cs| {
-        FW.lock(|f| {
-            let mut s = f.borrow_mut();
-            if !s.active || s.failed {
-                return false;
-            }
-            if s.written + s.page_len as u32 + data.len() as u32 > s.total {
-                s.failed = true;
-                return false;
-            }
-            let mut data = data;
-            while !data.is_empty() {
-                let plen = s.page_len;
-                let chunk = (PAGE_SZ - plen).min(data.len());
-                s.page[plen..plen + chunk].copy_from_slice(&data[..chunk]);
-                s.page_len = plen + chunk;
-                data = &data[chunk..];
-                if s.page_len == PAGE_SZ {
-                    if !page_flush(&mut s) {
-                        s.failed = true;
-                        return false;
-                    }
-                    s.written += PAGE_SZ as u32;
+    FW.lock(|f| {
+        let mut s = f.borrow_mut();
+        if !s.active || s.failed {
+            return false;
+        }
+        if s.written + s.page_len as u32 + data.len() as u32 > s.total {
+            s.failed = true;
+            return false;
+        }
+        let mut data = data;
+        while !data.is_empty() {
+            let plen = s.page_len;
+            let chunk = (PAGE_SZ - plen).min(data.len());
+            s.page[plen..plen + chunk].copy_from_slice(&data[..chunk]);
+            s.page_len = plen + chunk;
+            data = &data[chunk..];
+            if s.page_len == PAGE_SZ {
+                if !page_flush(&mut s) {
+                    s.failed = true;
+                    return false;
                 }
+                s.written += PAGE_SZ as u32;
             }
-            true
-        })
+        }
+        true
     })
 }
 
 pub fn abort() {
-    critical_section::with(|_cs| {
-        FW.lock(|f| {
-            let mut s = f.borrow_mut();
-            s.active = false;
-            s.failed = false;
-            s.page_len = 0;
-            s.written = 0;
-        })
+    FW.lock(|f| {
+        let mut s = f.borrow_mut();
+        s.active = false;
+        s.failed = false;
+        s.page_len = 0;
+        s.written = 0;
     });
 }
 
@@ -151,81 +148,93 @@ pub fn abort() {
 /// Resets the session; `received()`/`total()` read 0 afterwards.
 pub fn finish(crc: Option<u16>) -> bool {
     let mut ok = false;
-    critical_section::with(|_cs| {
-        FW.lock(|f| {
-            let mut s = f.borrow_mut();
-            if !s.active {
-                return;
-            }
-            s.active = false;
+    FW.lock(|f| {
+        let mut s = f.borrow_mut();
+        if !s.active {
+            return;
+        }
+        s.active = false;
 
-            let tail = s.page_len as u32;
-            if s.failed || !page_flush(&mut s) {
-                dbg_store(&[1, s.written + tail, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]);
-                return;
-            }
-            s.written += tail;
-            if s.written != s.total {
-                dbg_store(&[2, s.written, s.total, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]);
-                return;
-            }
+        let tail = s.page_len as u32;
+        if s.failed || !page_flush(&mut s) {
+            dbg_store(&[
+                1,
+                s.written + tail,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+            ]);
+            return;
+        }
+        s.written += tail;
+        if s.written != s.total {
+            dbg_store(&[2, s.written, s.total, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]);
+            return;
+        }
 
-            let total = s.total;
-            let mut crc_v = 0u16;
-            let mut buf = [0u8; READ_CHUNK];
-            let mut verified = true;
-            let mut off = 0u32;
-            while off < total {
-                let n = (total - off).min(READ_CHUNK as u32) as usize;
-                let got = matches!(
-                    nor_with(|nor| nor.read(off, &mut buf[..n])),
-                    Some(Ok(()))
-                );
-                if !got {
-                    verified = false;
-                    break;
-                }
-                if off == 0 {
-                    let mut d = [0u32; 16];
-                    d[0] = 3;
-                    d[1] = total;
-                    for (i, w) in buf[..16].chunks(4).enumerate() {
-                        d[4 + i] = u32::from_le_bytes([w[0], w[1], w[2], w[3]]);
-                    }
-                    dbg_store(&d);
-                }
-                crc_v = upg::crc16_ccitt(crc_v, &buf[..n]);
-                off += n as u32;
+        let total = s.total;
+        let mut crc_v = 0u16;
+        let mut buf = [0u8; READ_CHUNK];
+        let mut verified = true;
+        let mut off = 0u32;
+        while off < total {
+            let n = (total - off).min(READ_CHUNK as u32) as usize;
+            let got = matches!(nor_with(|nor| nor.read(off, &mut buf[..n])), Some(Ok(())));
+            if !got {
+                verified = false;
+                break;
             }
-            if !verified {
-                dbg_store(&[4, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]);
-                return;
-            }
-            let tlv_ok = tlv_keyhash_ok();
-            // crc=None (CAN CONFIRM, fw_upg_finish_ex(0,false) parity): skip
-            // the CRC compare — the MCUboot signature is the integrity gate
-            let crc_bad = match crc {
-                Some(expect) => crc_v != expect,
-                None => false,
-            };
-            if crc_bad || !tlv_ok {
-                // full diagnostics: computed/expected crc + tail bytes
-                let mut tail16 = [0u8; 16];
-                let tail_off = total.saturating_sub(16);
-                let _ = nor_with(|nor| nor.read(tail_off, &mut tail16));
+            if off == 0 {
                 let mut d = [0u32; 16];
-                d[0] = 5;
-                d[1] = crc_v as u32;
-                d[2] = crc.unwrap_or(0) as u32;
-                d[3] = tlv_ok as u32;
-                for (i, w) in tail16.chunks(4).enumerate() {
-                    d[8 + i] = u32::from_le_bytes([w[0], w[1], w[2], w[3]]);
+                d[0] = 3;
+                d[1] = total;
+                for (i, w) in buf[..16].chunks(4).enumerate() {
+                    d[4 + i] = u32::from_le_bytes([w[0], w[1], w[2], w[3]]);
                 }
                 dbg_store(&d);
-                return;
             }
-            ok = true;
-        })
+            crc_v = upg::crc16_ccitt(crc_v, &buf[..n]);
+            off += n as u32;
+        }
+        if !verified {
+            dbg_store(&[4, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]);
+            return;
+        }
+        let tlv_ok = tlv_keyhash_ok();
+        // crc=None (CAN CONFIRM, fw_upg_finish_ex(0,false) parity): skip
+        // the CRC compare — the MCUboot signature is the integrity gate
+        let crc_bad = match crc {
+            Some(expect) => crc_v != expect,
+            None => false,
+        };
+        if crc_bad || !tlv_ok {
+            // full diagnostics: computed/expected crc + tail bytes
+            let mut tail16 = [0u8; 16];
+            let tail_off = total.saturating_sub(16);
+            let _ = nor_with(|nor| nor.read(tail_off, &mut tail16));
+            let mut d = [0u32; 16];
+            d[0] = 5;
+            d[1] = crc_v as u32;
+            d[2] = crc.unwrap_or(0) as u32;
+            d[3] = tlv_ok as u32;
+            for (i, w) in tail16.chunks(4).enumerate() {
+                d[8 + i] = u32::from_le_bytes([w[0], w[1], w[2], w[3]]);
+            }
+            dbg_store(&d);
+            return;
+        }
+        ok = true;
     });
     ok
 }
@@ -245,38 +254,35 @@ fn tlv_keyhash_ok() -> bool {
     }
     let mut tlv = [0u8; TLV_READ];
     let read = (TLV_READ as u32).min(upg::SLOT1_SIZE - pos.tlv_off) as usize;
-    if !matches!(nor_with(|nor| nor.read(pos.tlv_off, &mut tlv[..read])), Some(Ok(()))) {
+    if !matches!(
+        nor_with(|nor| nor.read(pos.tlv_off, &mut tlv[..read])),
+        Some(Ok(()))
+    ) {
         return false;
     }
     matches!(upg::keyhash_in_tlv(&tlv[..read]), Some(kh) if kh == &upg::FW_KEYHASH)
 }
 
 pub fn received() -> u32 {
-    critical_section::with(|_cs| {
-        FW.lock(|f| {
-            let s = f.borrow();
-            s.written + s.page_len as u32
-        })
+    FW.lock(|f| {
+        let s = f.borrow();
+        s.written + s.page_len as u32
     })
 }
 
 pub fn total() -> u32 {
-    critical_section::with(|_cs| {
-        FW.lock(|f| {
-            let s = f.borrow();
-            if s.active {
-                s.total
-            } else {
-                0
-            }
-        })
+    FW.lock(|f| {
+        let s = f.borrow();
+        if s.active {
+            s.total
+        } else {
+            0
+        }
     })
 }
 
 pub fn active() -> bool {
-    critical_section::with(|_cs| {
-        FW.lock(|f| f.borrow().active)
-    })
+    FW.lock(|f| f.borrow().active)
 }
 
 // ==================== MCUboot trailer (boot_set_pending) ====================

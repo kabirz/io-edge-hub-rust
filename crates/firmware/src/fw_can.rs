@@ -12,14 +12,14 @@
 //!   frames arrived, CONFIRM carries no CRC (MCUboot signature gates),
 //!   REBOOT is not answered
 
-use embassy_stm32::Peri;
 use embassy_stm32::bind_interrupts;
 use embassy_stm32::can::filter::Mask16;
 use embassy_stm32::can::{
-    BufferedCan, Can, Fifo, Frame, Id, Rx0InterruptHandler, Rx1InterruptHandler,
-    RxBuf, SceInterruptHandler, StandardId, TxInterruptHandler, TxBuf,
+    BufferedCan, Can, Fifo, Frame, Id, Rx0InterruptHandler, Rx1InterruptHandler, RxBuf,
+    SceInterruptHandler, StandardId, TxBuf, TxInterruptHandler,
 };
 use embassy_stm32::peripherals::{CAN1, PA11, PA12};
+use embassy_stm32::Peri;
 use embassy_time::Timer;
 
 use io_edge_hub_proto::fw_upg as upg;
@@ -114,10 +114,7 @@ pub async fn fw_can_task(
     // drained by the interrupt into a 128-frame ring the task consumes
     static TXB: static_cell::StaticCell<TxBuf<16>> = static_cell::StaticCell::new();
     static RXB: static_cell::StaticCell<RxBuf<128>> = static_cell::StaticCell::new();
-    let mut can = can.buffered::<16, 128>(
-        TXB.init(TxBuf::new()),
-        RXB.init(RxBuf::new()),
-    );
+    let mut can = can.buffered::<16, 128>(TXB.init(TxBuf::new()), RXB.init(RxBuf::new()));
 
     let mut msg = heapless::String::<48>::new();
     use core::fmt::Write as _;
@@ -239,10 +236,16 @@ async fn handle_platform(
             }
         }
         CMD_REBOOT => {
-            // no reply; short drain then reset via the standard reboot path
+            // no reply (fw_can.c parity): ~100ms drain, flush the history
+            // cache, then reset inline — vTaskDelay(100) + log_flush(500)
+            // + history_sync() + NVIC_SystemReset()
             crate::log::inf("fwcan: reboot requested");
             Timer::after_millis(100).await;
-            crate::appstate::set_reboot_status(true);
+            crate::storage::QUEUE
+                .try_send(crate::storage::StorageCmd::Sync)
+                .ok();
+            Timer::after_millis(500).await;
+            crate::reboot::system_reset();
         }
         _ => {}
     }
