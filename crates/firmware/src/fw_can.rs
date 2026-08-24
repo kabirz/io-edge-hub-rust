@@ -7,7 +7,7 @@
 //! - filter bank 0, 16-bit id-mask, FIFO0: half-slot A exact business ID
 //!   (holding[0x06]), half-slot B the 0x100-0x1FF upgrade range
 //! - protocol 0x101 cmd / 0x102 reply / 0x103 data / 0x104 keyhash
-//!   / 0x105 version frames; flow control acks every 512 B
+//!   / 0x105 version frames; flow control acks every 64 B
 //! - START reopens unconditionally, keyhash only checked when all 5
 //!   frames arrived, CONFIRM carries no CRC (MCUboot signature gates),
 //!   REBOOT is not answered
@@ -63,7 +63,13 @@ const CONFIRM_MAGIC: u32 = 0x55AA_55AA;
 const KEYHASH_CHUNK: usize = 7;
 const KEYHASH_CHUNKS: usize = (upg::FW_KEYHASH_LEN + KEYHASH_CHUNK - 1) / KEYHASH_CHUNK;
 const KEYHASH_FULL_MASK: u8 = (1u16 << KEYHASH_CHUNKS) as u8 - 1;
-const ACK_INTERVAL: u32 = 512;
+/// Flow control: OFFSET ack every 64 B (Zephyr authoritative
+/// libs/can_fw_upgrade handle_fw_data `fw_written % 64 == 0`). The host tool
+/// (io-edge-hub can_manager.c) reads a reply after every 8 frames/64 B and
+/// tolerates a missing one with a 2 s timeout — at 512 B (the FreeRTOS
+/// port's interval) it burns 7 timeouts per window, stretching a full push
+/// to >90 minutes.
+const ACK_INTERVAL: u32 = 64;
 
 /// C can_timing_table's supported set (800k impossible at 42MHz).
 const SUPPORTED_KBPS: [u32; 6] = [50, 100, 125, 250, 500, 1000];
