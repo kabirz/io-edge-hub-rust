@@ -123,7 +123,22 @@ async fn session(ctrl: &mut TcpSocket<'static>, data: &mut TcpSocket<'static>, s
     let mut rx_len = 0usize;
     while !s.quit {
         let n = match ctrl.read(&mut rbuf[rx_len..]).await {
-            Ok(0) | Err(_) => return,
+            Ok(0) => {
+                crate::log::wrn("ftp: ctrl eof");
+                return;
+            }
+            Err(e) => {
+                // ConnectionReset here is usually a host-side FTP-aware
+                // filter resetting on a malformed PORT before it reaches us
+                let mut m = heapless::String::<64>::new();
+                use core::fmt::Write as _;
+                let _ = core::fmt::write(
+                    &mut m,
+                    core::format_args!("ftp: ctrl read err {:?}", e),
+                );
+                crate::log::err(&m);
+                return;
+            }
             Ok(n) => n,
         };
         rx_len += n;
@@ -132,6 +147,7 @@ async fn session(ctrl: &mut TcpSocket<'static>, data: &mut TcpSocket<'static>, s
                 Some(i) => i,
                 None => {
                     if rx_len >= rbuf.len() - 1 {
+                        crate::log::wrn("ftp: line overflow");
                         return; // line overflow
                     }
                     break;
@@ -367,7 +383,10 @@ async fn handle_command(
                 s.port_ep = Some(ep);
                 send_line(ctrl, "200 PORT command successful").await;
             }
-            None => send_line(ctrl, "501 Syntax error in parameters").await,
+            None => {
+                crate::log::wrn("ftp: bad PORT rejected");
+                send_line(ctrl, "501 Syntax error in parameters").await;
+            }
         },
         "EPRT" => match parse_eprt_arg(arg) {
             Some(ep) => {
@@ -493,54 +512,18 @@ fn local_ip() -> [u8; 4] {
 }
 
 fn parse_port_arg(arg: &str) -> Option<IpEndpoint> {
-    // iterator parse: no collect (a heapless Vec::collect panics on overflow
-    // with more parts than capacity, and indexing assumed exactly 6)
-    let mut vals = [0u16; 6];
-    let mut it = arg.split(',');
-    for v in vals.iter_mut() {
-        *v = it.next()?.parse().ok()?;
-    }
-    // a trailing empty part (trailing comma) is tolerated, extra data is not
-    if it.next().is_some_and(|s| !s.is_empty()) {
-        return None;
-    }
-    if vals.iter().any(|&v| v > 255) {
-        return None;
-    }
+    // parsing lives in proto (host-tested); see ftp.rs hardening notes
+    let (ip, port) = io_edge_hub_proto::ftp::parse_port_arg(arg)?;
     Some(IpEndpoint {
-        addr: IpAddress::Ipv4(Ipv4Address::new(
-            vals[0] as u8,
-            vals[1] as u8,
-            vals[2] as u8,
-            vals[3] as u8,
-        )),
-        port: ((vals[4] as u16) << 8) | vals[5] as u16,
+        addr: IpAddress::Ipv4(Ipv4Address::new(ip[0], ip[1], ip[2], ip[3])),
+        port,
     })
 }
 
 fn parse_eprt_arg(arg: &str) -> Option<IpEndpoint> {
-    let mut it = arg.split('|');
-    it.next()?;
-    let proto: u32 = it.next()?.parse().ok()?;
-    let ip = it.next()?;
-    let port: u16 = it.next()?.parse().ok()?;
-    // trailing delimiter is standard ("|1|ip|port|"), extra data is not
-    if it.next().is_some_and(|s| !s.is_empty()) {
-        return None;
-    }
-    if proto != 1 || port == 0 {
-        return None;
-    }
-    let mut a = [0u8; 4];
-    let mut iit = ip.split('.');
-    for v in a.iter_mut() {
-        *v = iit.next()?.parse().ok()?;
-    }
-    if iit.next().is_some() {
-        return None;
-    }
+    let (ip, port) = io_edge_hub_proto::ftp::parse_eprt_arg(arg)?;
     Some(IpEndpoint {
-        addr: IpAddress::Ipv4(Ipv4Address::new(a[0], a[1], a[2], a[3])),
+        addr: IpAddress::Ipv4(Ipv4Address::new(ip[0], ip[1], ip[2], ip[3])),
         port,
     })
 }
