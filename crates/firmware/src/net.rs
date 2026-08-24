@@ -314,29 +314,6 @@ async fn udp_task(stack: Stack<'static>) {
             continue;
         }
 
-        // debug: cmd 0xF7 dumps NOR op counters (storm forensics; survive IWDG)
-        if cmd == 0xF7 {
-            use core::sync::atomic::Ordering::Relaxed;
-            let mut rep = [0u8; 28];
-            rep[0] = 0xF7;
-            let vals = [
-                crate::storage::NOR_NREAD.load(Relaxed),
-                crate::storage::NOR_NWRITE.load(Relaxed),
-                crate::storage::NOR_NERASE.load(Relaxed),
-                crate::storage::NOR_NERR.load(Relaxed),
-                crate::storage::NOR_LASTW.load(Relaxed),
-                crate::storage::NOR_LASTE.load(Relaxed),
-            ];
-            for (i, v) in vals.iter().enumerate() {
-                rep[4 + i * 4] = (v >> 24) as u8;
-                rep[5 + i * 4] = (v >> 16) as u8;
-                rep[6 + i * 4] = (v >> 8) as u8;
-                rep[7 + i * 4] = *v as u8;
-            }
-            sock.send_to(&rep, meta.endpoint).await.ok();
-            continue;
-        }
-
         let rlen = critical_section::with(|_cs| {
             REGS.lock(|r| {
                 UDP_STATE.lock(|st| {

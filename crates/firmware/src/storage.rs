@@ -265,15 +265,6 @@ pub fn nor_with<R>(f: impl FnOnce(&mut W25q) -> R) -> Option<R> {
 /// at 256 B pages like lf_prog.
 pub(crate) struct LfsNor;
 
-// op counters for the storm forensics (UDP debug 0xF7); plain statics survive
-// an IWDG reset, so they can be read after a freeze+reboot
-pub(crate) static NOR_NREAD: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(0);
-pub(crate) static NOR_NWRITE: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(0);
-pub(crate) static NOR_NERASE: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(0);
-pub(crate) static NOR_NERR: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(0);
-pub(crate) static NOR_LASTW: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(0);
-pub(crate) static NOR_LASTE: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(0);
-
 impl Storage for LfsNor {
     const READ_SIZE: usize = 16;
     const WRITE_SIZE: usize = 16;
@@ -284,19 +275,13 @@ impl Storage for LfsNor {
     type LOOKAHEAD_SIZE = U32;
 
     fn read(&mut self, off: usize, buf: &mut [u8]) -> littlefs2::io::Result<usize> {
-        NOR_NREAD.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
         nor_with(|w| w.read(LFS_OFFSET + off as u32, buf))
             .unwrap_or(Err(()))
             .map(|_| buf.len())
-            .map_err(|_| {
-                NOR_NERR.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
-                littlefs2::io::Error::IO
-            })
+            .map_err(|_| littlefs2::io::Error::IO)
     }
 
     fn write(&mut self, off: usize, data: &[u8]) -> littlefs2::io::Result<usize> {
-        NOR_NWRITE.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
-        NOR_LASTW.store(off as u32, core::sync::atomic::Ordering::Relaxed);
         let mut addr = LFS_OFFSET + off as u32;
         let mut p = 0usize;
         while p < data.len() {
@@ -304,10 +289,7 @@ impl Storage for LfsNor {
             chunk = chunk.min(data.len() - p);
             nor_with(|w| w.write(addr, &data[p..p + chunk]))
                 .unwrap_or(Err(()))
-                .map_err(|_| {
-                    NOR_NERR.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
-                    littlefs2::io::Error::IO
-                })?;
+                .map_err(|_| littlefs2::io::Error::IO)?;
             addr += chunk as u32;
             p += chunk;
         }
@@ -315,15 +297,10 @@ impl Storage for LfsNor {
     }
 
     fn erase(&mut self, off: usize, len: usize) -> littlefs2::io::Result<usize> {
-        NOR_NERASE.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
-        NOR_LASTE.store(off as u32, core::sync::atomic::Ordering::Relaxed);
         nor_with(|w| w.erase(LFS_OFFSET + off as u32, len as u32))
             .unwrap_or(Err(()))
             .map(|_| len)
-            .map_err(|_| {
-                NOR_NERR.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
-                littlefs2::io::Error::IO
-            })
+            .map_err(|_| littlefs2::io::Error::IO)
     }
 }
 
@@ -456,8 +433,28 @@ impl HistState {
     }
 }
 
-fn hist_write(fs: &mut Filesystem<'_, LfsNor>, st: &mut HistState, d: &HisData) {
-    let mut rec = d.to_bytes();
+/// Flush buffered records of the open history file (C's history_sync):
+/// called before web listings/downloads and on explicit Sync — NOT per
+/// record (per-record sync re-commits the full inline data every write).
+fn hist_sync() {
+    let mut file = critical_section::with(|_cs| {
+        OPEN_FILE.lock(|o| o.borrow_mut().as_mut().and_then(|h| h.file.take()))
+    });
+    if let Some(f) = file.as_mut() {
+        let _ = f.sync();
+    }
+    if file.is_some() {
+        critical_section::with(|_cs| {
+            OPEN_FILE.lock(|o| {
+                if let Some(h) = o.borrow_mut().as_mut() {
+                    h.file = file;
+                }
+            })
+        });
+    }
+}
+
+fn hist_write(fs: &mut Filesystem<'_, LfsNor>, st: &mut HistState, d: &HisData) {    let mut rec = d.to_bytes();
     let rec = &mut rec[..d.rec_len()];
 
     // fast path: the open file stays open across records (C's his_fp) —
@@ -473,11 +470,11 @@ fn hist_write(fs: &mut Filesystem<'_, LfsNor>, st: &mut HistState, d: &HisData) 
         Some(f) => {
             let ok = match f.len() {
                 Ok(len) if (len as u32) < HIST_FILE_MAX => {
-                    let mut ok = f.write(rec).is_ok();
-                    if ok {
-                        let _ = f.sync();
-                    }
-                    ok
+                    // buffered write only — NO per-record sync (matches C's
+                    // hist_file_write): every sync commits the file's full
+                    // inline data as a fresh tag, filling the directory and
+                    // forcing a compaction every ~8 records (erase storm)
+                    f.write(rec).is_ok()
                 }
                 _ => false,
             };
@@ -726,10 +723,14 @@ pub async fn storage_task() {
                     })
                 });
             }
-            StorageCmd::Sync => {}
+            StorageCmd::Sync => {
+                hist_sync();
+                RPC_SEQ.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+            }
             StorageCmd::CfgSave => cfg_save(),
             StorageCmd::CfgEraseAll => cfg_erase_all(),
             StorageCmd::SnapReq => {
+                hist_sync(); // flush buffered records before the listing
                 let _ = fs_snapshot(&mut *fs);
                 RPC_SEQ.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
             }
@@ -740,6 +741,7 @@ pub async fn storage_task() {
                 }
             }
             StorageCmd::FileOpen(name) => {
+                hist_sync(); // C syncs before downloads expose the tail
                 let _ = file_open(&mut *fs, &name);
                 RPC_SEQ.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
             }
@@ -752,10 +754,12 @@ pub async fn storage_task() {
                 RPC_SEQ.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
             }
             StorageCmd::FtpLs(path) => {
+                hist_sync(); // flush so LIST shows the buffered tail (C parity)
                 ftp_ls(&mut *fs, path);
                 RPC_SEQ.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
             }
             StorageCmd::FtpOpenRead { slot, path, rest } => {
+                hist_sync(); // flush before RETR exposes the file
                 let ok = ftp_open_read(&mut *fs, slot, path, rest);
                 let size = critical_section::with(|_cs| {
                     FTP_XFER[slot as usize].lock(|f| f.borrow().size)
@@ -889,10 +893,23 @@ fn ftp_ls(fs: &mut Filesystem<'_, LfsNor>, path: FtpPath) {
     });
 }
 
-/// Open for chunked read at `rest` (cmd_retr + REST), session slot.
-fn ftp_open_read(fs: &mut Filesystem<'_, LfsNor>, slot: u8, path: FtpPath, rest: u32) -> bool {
+/// Close any handles the slot still holds (dl AND wr) before its allocation
+/// cell is reused for a new open — leaving one linked in littlefs's mlist
+/// makes the next open append an already-linked node (self-cycle, the
+/// commit mlist walk then spins forever). Closes run outside the cs.
+fn slot_close_all(slot: u8) {
     let slot = (slot as usize).min(2);
-    // reset the slot + close its stale read handle
+    let (dl, wr) = critical_section::with(|_cs| {
+        FTP_XFER[slot].lock(|x| {
+            let mut g = x.borrow_mut();
+            (g.dl.0.take(), g.wr.0.take())
+        })
+    });
+    for f in [dl, wr].into_iter().flatten() {
+        unsafe {
+            let _ = f.close();
+        }
+    }
     critical_section::with(|_cs| {
         FTP_XFER[slot].lock(|x| {
             let mut g = x.borrow_mut();
@@ -901,13 +918,16 @@ fn ftp_open_read(fs: &mut Filesystem<'_, LfsNor>, slot: u8, path: FtpPath, rest:
             g.size = 0;
             g.sent = 0;
             g.chunk_len = 0;
-            if let Some(f) = g.dl.0.take() {
-                unsafe {
-                    let _ = f.close();
-                }
-            }
+            g.wpos = 0;
         })
     });
+}
+
+/// Open for chunked read at `rest` (cmd_retr + REST), session slot.
+fn ftp_open_read(fs: &mut Filesystem<'_, LfsNor>, slot: u8, path: FtpPath, rest: u32) -> bool {
+    let slot = (slot as usize).min(2);
+    // close any stale handles (dl AND wr) so the alloc cell is unlinked
+    slot_close_all(slot as u8);
     let p = match ftp_path_of(&path) {
         Some(p) => p,
         None => return false,
@@ -943,7 +963,8 @@ fn ftp_open_read(fs: &mut Filesystem<'_, LfsNor>, slot: u8, path: FtpPath, rest:
 }
 
 fn ftp_open_write(fs: &mut Filesystem<'_, LfsNor>, slot: u8, path: FtpPath, mode: FtpWrMode) {
-    ftp_close_write_quiet(slot.min(2));
+    // close any stale handles (wr AND dl) so the alloc cell is unlinked
+    slot_close_all(slot);
     let slot = (slot as usize).min(2);
     let p = match ftp_path_of(&path) {
         Some(p) => p,

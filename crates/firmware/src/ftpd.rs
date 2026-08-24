@@ -50,7 +50,9 @@ pub async fn ftp_task(
     }
 }
 
-/// 4th+ client: connect -> 421 -> close (only listens when all slots busy).
+/// 4th+ client: connect -> 421 -> close. Arms ONLY while all slots are
+/// busy and disarms within 50 ms of the load dropping — a lingering
+/// listener would steal legit reconnects after sessions end.
 #[embassy_executor::task]
 pub async fn ftp_reject_task(
     stack: Stack<'static>,
@@ -61,14 +63,19 @@ pub async fn ftp_reject_task(
     sock.set_timeout(Some(Duration::from_secs(5)));
     loop {
         if FTP_BUSY.load(Ordering::Relaxed) >= 3 {
-            if sock.accept(FTP_PORT).await.is_ok() {
-                let _ = sock.write_all(b"421 Too many users\r\n").await;
-                let _ = sock.flush().await;
-                Timer::after_millis(50).await;
-                sock.abort();
+            match select(sock.accept(FTP_PORT), Timer::after_millis(50)).await {
+                Either::First(Ok(())) => {
+                    let _ = sock.write_all(b"421 Too many users\r\n").await;
+                    let _ = sock.flush().await;
+                    Timer::after_millis(50).await;
+                }
+                _ => {
+                    sock.abort(); // busy window passed: disarm promptly
+                }
             }
+        } else {
+            Timer::after_millis(5).await;
         }
-        Timer::after_millis(5).await;
     }
 }
 

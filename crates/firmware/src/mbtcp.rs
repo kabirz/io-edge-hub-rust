@@ -43,19 +43,27 @@ pub async fn conn_task(stack: Stack<'static>, rx_buf: &'static mut [u8; 512], tx
 /// Third listener: accepts the excess connection then immediately aborts it
 /// (tcp.c accepts-then-aborts when no serving slot is free — the client's
 /// connect() succeeds and its request dies with a reset).
+/// Arms ONLY while both serving slots are busy and disarms within 50 ms of
+/// the load dropping — a lingering listener steals the next legit client
+/// (the FTP rejector had the same latch bug).
 #[embassy_executor::task]
 pub async fn reject_task(stack: Stack<'static>, rx_buf: &'static mut [u8; 64], tx_buf: &'static mut [u8; 64]) {
+    use embassy_futures::select::{select, Either};
     let mut sock = TcpSocket::new(stack, rx_buf, tx_buf);
     sock.set_timeout(Some(Duration::from_secs(5)));
     loop {
-        // Only listen while both serving slots are busy: a free server must
-        // win the SYN dispatch, so this socket stays out of LISTEN otherwise
         if BUSY.load(core::sync::atomic::Ordering::Relaxed) >= 2 {
-            if sock.accept(MBTCP_PORT).await.is_ok() {
-                sock.abort();
+            match select(sock.accept(MBTCP_PORT), Timer::after_millis(50)).await {
+                Either::First(Ok(())) => {
+                    sock.abort();
+                }
+                _ => {
+                    sock.abort(); // busy window passed: disarm promptly
+                }
             }
+        } else {
+            Timer::after_millis(5).await;
         }
-        Timer::after_millis(5).await;
     }
 }
 
