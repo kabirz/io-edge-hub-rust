@@ -15,8 +15,8 @@
 use embassy_stm32::bind_interrupts;
 use embassy_stm32::can::filter::Mask16;
 use embassy_stm32::can::{
-    BufferedCan, Can, Fifo, Frame, Id, Rx0InterruptHandler, Rx1InterruptHandler, RxBuf,
-    SceInterruptHandler, StandardId, TxBuf, TxInterruptHandler,
+    Can, CanTx, Fifo, Frame, Id, Rx0InterruptHandler, Rx1InterruptHandler, RxBuf,
+    SceInterruptHandler, StandardId, TxInterruptHandler,
 };
 use embassy_stm32::peripherals::{CAN1, PA11, PA12};
 use embassy_stm32::Peri;
@@ -109,12 +109,20 @@ pub async fn fw_can_task(
 
     can.enable().await;
 
-    // interrupt-fed ring buffers: the 3-deep hardware FIFO overflows during
-    // NOR page writes (~18 ms) when a host bursts 512 B windows, so RX is
-    // drained by the interrupt into a 128-frame ring the task consumes
-    static TXB: static_cell::StaticCell<TxBuf<16>> = static_cell::StaticCell::new();
+    // RX: interrupt-fed 128-frame ring — the 3-deep hardware FIFO overflows
+    // during NOR page writes when a host bursts 512 B windows, so the ISR
+    // drains it into the ring this task consumes.
+    // TX: direct mailbox writes via CanTx, NOT BufferedCanTx — the buffered
+    // TX interrupt dequeues a frame from its ring and DISCARDS it when
+    // Registers::transmit returns WouldBlock, which it does while an
+    // identical-ID frame is still pending in a mailbox (embassy 0.6,
+    // priority scheduling). That silently ate every same-ID frame after the
+    // first, e.g. the 2nd 0x105 version frame. CanTx::write parks on
+    // WouldBlock and retries on the mailbox-empty interrupt, like C's
+    // mod_can_send mailbox wait.
+    let (mut tx, rx) = can.split();
     static RXB: static_cell::StaticCell<RxBuf<128>> = static_cell::StaticCell::new();
-    let mut can = can.buffered::<16, 128>(TXB.init(TxBuf::new()), RXB.init(RxBuf::new()));
+    let mut rx = rx.buffered(RXB.init(RxBuf::new()));
 
     let mut msg = heapless::String::<48>::new();
     use core::fmt::Write as _;
@@ -126,7 +134,7 @@ pub async fn fw_can_task(
     let mut key_chunk_mask: u8 = 0;
 
     loop {
-        let env = match can.read().await {
+        let env = match rx.read().await {
             Ok(env) => env,
             Err(_) => continue,
         };
@@ -137,10 +145,10 @@ pub async fn fw_can_task(
         let data = env.frame.data();
         match fid {
             PLATFORM_RX => {
-                handle_platform(&mut can, data, &mut rx_keybuf, &mut key_chunk_mask).await;
+                handle_platform(&mut tx, data, &mut rx_keybuf, &mut key_chunk_mask).await;
             }
             FW_DATA_RX => {
-                handle_fw_data(&mut can, data).await;
+                handle_fw_data(&mut tx, data).await;
             }
             KEYHASH_RX => {
                 handle_keyhash(data, &mut rx_keybuf, &mut key_chunk_mask);
@@ -150,27 +158,27 @@ pub async fn fw_can_task(
     }
 }
 
-async fn send(can: &mut BufferedCan<'static, 16, 128>, id: u16, data: &[u8]) {
+async fn send(tx: &mut CanTx<'static>, id: u16, data: &[u8]) {
     if let Ok(f) = Frame::new_standard(id, data) {
-        let _ = can.write(&f).await;
+        let _ = tx.write(&f).await;
     }
 }
 
-async fn fw_reply(can: &mut BufferedCan<'static, 16, 128>, code: u32, arg: u32) {
+async fn fw_reply(tx: &mut CanTx<'static>, code: u32, arg: u32) {
     let mut d = [0u8; 8];
     d[..4].copy_from_slice(&code.to_le_bytes());
     d[4..].copy_from_slice(&arg.to_le_bytes());
-    send(can, PLATFORM_TX, &d).await;
+    send(tx, PLATFORM_TX, &d).await;
 }
 
 async fn handle_platform(
-    can: &mut BufferedCan<'static, 16, 128>,
+    tx: &mut CanTx<'static>,
     data: &[u8],
     rx_keybuf: &mut [u8; upg::FW_KEYHASH_LEN],
     key_chunk_mask: &mut u8,
 ) {
     if data.len() != 8 {
-        fw_reply(can, CODE_FLASH_ERROR, 0).await;
+        fw_reply(tx, CODE_FLASH_ERROR, 0).await;
         return;
     }
     let cmd = u32::from_le_bytes([data[0], data[1], data[2], data[3]]);
@@ -190,39 +198,39 @@ async fn handle_platform(
             let rc = fw::start(arg, kh);
             if rc == -2 {
                 crate::log::wrn("fwcan: keyhash mismatch");
-                fw_reply(can, CODE_KEYHASH_ERROR, 0).await;
+                fw_reply(tx, CODE_KEYHASH_ERROR, 0).await;
                 return;
             }
             if rc != 0 {
                 crate::log::wrn("fwcan: start failed");
-                fw_reply(can, CODE_FLASH_ERROR, 0).await;
+                fw_reply(tx, CODE_FLASH_ERROR, 0).await;
                 return;
             }
             crate::log::inf("fwcan: start");
-            fw_reply(can, CODE_OFFSET, 0).await;
+            fw_reply(tx, CODE_OFFSET, 0).await;
         }
         CMD_CONFIRM => {
             if !fw::active() {
                 crate::log::wrn("fwcan: confirm before start");
-                fw_reply(can, CODE_TRANSFER_ERROR, 0).await;
+                fw_reply(tx, CODE_TRANSFER_ERROR, 0).await;
                 return;
             }
             if !fw::finish(None) {
                 crate::log::wrn("fwcan: confirm verify failed");
-                fw_reply(can, CODE_TRANSFER_ERROR, 0).await;
+                fw_reply(tx, CODE_TRANSFER_ERROR, 0).await;
                 return;
             }
             if !fw::boot_set_pending(arg != 0) {
                 crate::log::err("fwcan: boot_set_pending failed");
-                fw_reply(can, CODE_TRANSFER_ERROR, 0).await;
+                fw_reply(tx, CODE_TRANSFER_ERROR, 0).await;
                 return;
             }
             crate::log::inf("fwcan: confirmed, awaiting reboot");
-            fw_reply(can, CODE_CONFIRM, CONFIRM_MAGIC).await;
+            fw_reply(tx, CODE_CONFIRM, CONFIRM_MAGIC).await;
         }
         CMD_VERSION => {
             let ver = crate::appstate::version::FW_VERSION;
-            fw_reply(can, CODE_VERSION, ver.len() as u32).await;
+            fw_reply(tx, CODE_VERSION, ver.len() as u32).await;
             let mut off = 0usize;
             let mut seq = 0u8;
             while off < ver.len() {
@@ -230,7 +238,7 @@ async fn handle_platform(
                 let mut d = [0u8; 8];
                 d[0] = seq;
                 d[1..1 + chunk].copy_from_slice(&ver.as_bytes()[off..off + chunk]);
-                send(can, VERSION_TX, &d).await;
+                send(tx, VERSION_TX, &d).await;
                 off += chunk;
                 seq += 1;
             }
@@ -251,22 +259,22 @@ async fn handle_platform(
     }
 }
 
-async fn handle_fw_data(can: &mut BufferedCan<'static, 16, 128>, data: &[u8]) {
+async fn handle_fw_data(tx: &mut CanTx<'static>, data: &[u8]) {
     if !fw::active() {
         crate::log::wrn("fwcan: data before start");
-        fw_reply(can, CODE_TRANSFER_ERROR, 0).await;
+        fw_reply(tx, CODE_TRANSFER_ERROR, 0).await;
         return;
     }
     if !fw::write(data) {
         crate::log::err("fwcan: write failed");
-        fw_reply(can, CODE_FLASH_ERROR, 0).await;
+        fw_reply(tx, CODE_FLASH_ERROR, 0).await;
         return;
     }
     let got = fw::received();
     if got == fw::total() {
-        fw_reply(can, CODE_UPDATE_SUCCESS, got).await;
+        fw_reply(tx, CODE_UPDATE_SUCCESS, got).await;
     } else if got % ACK_INTERVAL == 0 {
-        fw_reply(can, CODE_OFFSET, got).await;
+        fw_reply(tx, CODE_OFFSET, got).await;
     }
 }
 
