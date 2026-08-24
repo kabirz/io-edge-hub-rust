@@ -4,6 +4,7 @@
 mod appstate;
 mod ftpd;
 mod fw;
+mod fw_can;
 mod httpd;
 mod io_gpio;
 mod log;
@@ -314,6 +315,12 @@ async fn main(spawner: Spawner) {
             rx_dma: dp.DMA1_CH5,
         })
         .expect("spawn rtu"));
+
+    // CAN1 fw-upgrade channel (PA11/PA12, baud/id snapshot from cfg)
+    spawner
+        .spawn(
+            fw_can::fw_can_task(dp.CAN1, dp.PA11, dp.PA12).expect("spawn fwcan"),
+        );
 
     // DI16 sampling (channel order = dio.c di_pins, pull-down active-high)
     spawner

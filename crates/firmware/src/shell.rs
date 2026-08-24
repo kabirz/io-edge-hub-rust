@@ -179,10 +179,11 @@ fn complete_level(line: &[u8], n: usize) -> (Option<&'static [Cmd]>, usize, usiz
 }
 
 fn complete(line: &mut [u8; LINE_MAX], n: &mut usize) {
+    static PLACEHOLDER: Cmd = Cmd { name: "", sub: LEAF };
     let (tbl, wstart, wlen0) = complete_level(line, *n);
     let Some(tbl) = tbl else { return };
     let mut wlen = wlen0;
-    let mut cand: [&'static Cmd; 16] = [&LEAF[0]; 16]; // placeholder, overwritten
+    let mut cand: [&'static Cmd; 16] = [&PLACEHOLDER; 16]; // overwritten below
     let mut ncand = 0usize;
     for c in tbl {
         if c.name.as_bytes().len() >= wlen
