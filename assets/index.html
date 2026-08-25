@@ -361,11 +361,11 @@ footer{text-align:center;color:#b6bcc9;font-size:12px;padding-top:8px}
 <!-- ================= 固件升级 ================= -->
 <section id="t-fw" class="hide">
 	<div class="card">
-		<h2>固件升级 <span class="badge y">MCUboot 签名镜像</span></h2>
-		<div class="tip">上传 signed.bin（MCUboot 签名镜像），写入 slot1 并校验 CRC 与签名 keyhash，成功后设备自动重启完成换</div>
+		<h2>固件升级 <span class="badge y">ed25519 签名载荷</span></h2>
+		<div class="tip">上传 app.dfu.bin（裸镜像 + 64B ed25519 签名），写入 DFU 分区并校验 CRC 与签名，成功后设备自动重启完成换机</div>
 		<div class="up-drop" id="upDrop">
 			点击选择或拖拽固件文件到此处<br>
-			<span style="font-size:12px">支持 .bin（MCUboot signed image）</span>
+			<span style="font-size:12px">支持 .dfu.bin（raw image + 64B ed25519 signature）</span>
 			<input type="file" id="upFile" class="hide" accept=".bin">
 		</div>
 		<div class="prog" id="upProg"><i></i></div>
@@ -432,7 +432,7 @@ function fmtUp(ms){const s=Math.floor(ms/1000),d=Math.floor(s/86400),h=Math.floo
 let curTab="ov";
 const TAB_TIPS={ov:"板卡与固件基础信息",io:"16 路数字输入 · 8 路数字输出 · 4 路模拟输入",
 	rg:"保持寄存器 40001-40018 · 输入寄存器 30001-30006",hi:"LittleFS 历史采集文件",
-	cf:"网络 / Modbus / CAN 参数配置 (重启生效)",fw:"MCUboot 签名镜像升级"};
+	cf:"网络 / Modbus / CAN 参数配置 (重启生效)",fw:"ed25519 签名固件升级"};
 document.querySelectorAll("#tabs button").forEach(b=>b.onclick=()=>{
 	document.querySelectorAll("#tabs button").forEach(x=>x.classList.toggle("on",x===b));
 	curTab=b.dataset.t;
@@ -460,7 +460,7 @@ function renderInfo(d){
 		"存储空间":"剩余 "+fmtBytes(d.lfs_free)+" / "+fmtBytes(d.lfs_total),
 		"网络链路":d.net_up?"<span style='color:var(--on)'>正常</span>":"<span style='color:var(--err)'>断开</span>",
 		"采样间隔":"DI "+d.di_ms+" ms · AI "+d.ai_ms+" ms"});
-	$("#fwKv").innerHTML=kv({"当前版本":d.version,"编译时间":d.build,"MCUboot":"swap-scratch",
+	$("#fwKv").innerHTML=kv({"当前版本":d.version,"编译时间":d.build,"Bootloader":"embassy-boot",
 		"升级方式":"HTTP 上传 / UDP / CAN"});
 }
 async function loadInfoHTTP(){try{renderInfo(await api("/api/info"))}catch(e){}}
@@ -685,61 +685,35 @@ function pickFile(f){
 }
 function setMsg(m,c){const e=$("#upMsg");e.textContent=m;e.className="msg "+(c||"")}
 
-/* MCUboot 镜像格式常量 */
-const IMG_MAGIC=0x96F3B83D;
-const IMG_TLV_INFO_MAGIC=0x6907;
-const IMG_TLV_KEYHASH=0x0001;
+/* 升级载荷: 裸镜像 + 尾部 64B ed25519 签名 (tools/sign.py 产出的 app.dfu.bin).
+ * keyhash 不在文件内 —— 是编译期常量 SHA-256(公钥), 与固件
+ * proto::fw_upg::FW_KEYHASH、tools/host-tool fw_image.c 同源, 换钥匙同步改. */
+const IMG_SIG_LEN=64;
+const IMG_MAX_SIZE=512*1024;
+const IMG_MCUBOOT_MAGIC=0x96F3B83D;
+const FW_KEYHASH_HEX="7cb9c1c5524df6bda973b751dad4201d2d5d8908668eafdf4419239969c6851f";
 
-/* 验证 MCUboot 镜像 magic 并提取 keyhash */
+function keyhashBytes(){
+	const out=new Uint8Array(32);
+	for(let i=0;i<32;i++){
+		out[i]=parseInt(FW_KEYHASH_HEX.substr(i*2,2),16);
+	}
+	return out;
+}
+
+/* 校验载荷: 长度能容纳尾部签名且不超过设备 DFU 分区; 识别旧 MCUboot 镜像 */
 async function parseFirmwareImage(file){
 	const buf=await file.arrayBuffer();
 	const view=new DataView(buf);
 
-	/* 校验 image magic (offset 0, LE32) */
-	const magic=view.getUint32(0,true);
-	if(magic!==IMG_MAGIC){
-		throw new Error("不是有效的 MCUboot 签名镜像 (magic 不匹配)");
+	if(view.getUint32(0,true)===IMG_MCUBOOT_MAGIC){
+		throw new Error("旧 MCUboot 格式镜像, 与本固件不匹配 (请使用 app.dfu.bin)");
+	}
+	if(buf.byteLength<=IMG_SIG_LEN||buf.byteLength>IMG_MAX_SIZE){
+		throw new Error("载荷长度非法 ("+buf.byteLength+"B, 应为 app.dfu.bin: 64B < 大小 ≤ 512K)");
 	}
 
-	/* 读取 header size (offset 8, LE16) 和 image size (offset 12, LE32) */
-	const hdrSize=view.getUint16(8,true);
-	const imgSize=view.getUint32(12,true);
-
-	if(hdrSize<32||(hdrSize&0x3)){
-		throw new Error("镜像头大小异常: "+hdrSize);
-	}
-	if(imgSize>buf.byteLength){
-		throw new Error("镜像大小异常: img_size "+imgSize+" > 文件大小 "+buf.byteLength);
-	}
-
-	/* 定位 TLV 区 */
-	const tlvOff=hdrSize+imgSize;
-	if(tlvOff+4>buf.byteLength){
-		throw new Error("TLV 区越界, 镜像可能被截断");
-	}
-
-	const tlvMagic=view.getUint16(tlvOff,true);
-	if(tlvMagic!==IMG_TLV_INFO_MAGIC){
-		throw new Error("TLV info magic 不匹配: 0x"+tlvMagic.toString(16));
-	}
-
-	/* 遍历 TLV 找 KEYHASH */
-	let keyhash=null;
-	let off=tlvOff+4;
-	while(off+4<=buf.byteLength){
-		const type=view.getUint16(off,true);
-		const tlvLen=view.getUint16(off+2,true);
-		if(type===0||tlvLen===0||off+4+tlvLen>buf.byteLength){
-			break;
-		}
-		if(type===IMG_TLV_KEYHASH&&tlvLen===32){
-			keyhash=new Uint8Array(buf,off+4,32);
-			break;
-		}
-		off+=4+tlvLen;
-	}
-
-	return{data:new Uint8Array(buf),size:buf.byteLength,keyhash:keyhash};
+	return{data:new Uint8Array(buf),size:buf.byteLength,keyhash:keyhashBytes()};
 }
 
 /* Base64 编码 */
@@ -759,13 +733,9 @@ async function doUpgrade(){
 	const prog=$("#upProg");prog.style.display="block";
 
 	try{
-		/* 解析镜像并验证 magic, 提取 keyhash */
-		setMsg("校验镜像格式…");
+		/* 校验载荷并取常量 keyhash (SHA-256 of ed25519 公钥) */
+		setMsg("校验载荷格式…");
 		const img=await parseFirmwareImage(upFileBuf);
-
-		if(!img.keyhash){
-			throw new Error("镜像未签名 (无 KEYHASH TLV)");
-		}
 
 		/* 将 keyhash 编码为 Base64, 随 fw_start 一起发送到设备端验证 */
 		const keyhashB64=toBase64(img.keyhash);
@@ -773,7 +743,7 @@ async function doUpgrade(){
 		const r=await wsSend({cmd:"fw_start",size:img.size,keyhash:keyhashB64});
 		if(!r.ok){
 			if(r.err==="keyhash mismatch"){
-				throw new Error("设备拒绝: 签名密钥不匹配 (镜像签名密钥与设备不一致)");
+				throw new Error("设备拒绝: 签名密钥不匹配 (载荷与设备固件密钥不一致)");
 			}
 			throw new Error("启动失败: "+r.err);
 		}
