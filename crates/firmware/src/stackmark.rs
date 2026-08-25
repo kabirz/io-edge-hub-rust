@@ -20,6 +20,8 @@ const PATTERN: u32 = 0xA5A5_A5A5;
 extern "C" {
     static _stack_end: u32; // bottom: first byte past .bss (start of free RAM)
     static _stack_start: u32; // top: initial SP (end of RAM)
+    static __sccm: u32; // CCM region start (.ccm.bss)
+    static __eccm: u32; // CCM region end
 }
 
 /// One row per spawned task, in `tasks`/`ps` display order. The [slot]
@@ -68,20 +70,29 @@ pub mod slot {
     pub const SH: usize = 19;
 }
 
-/// Lowest MSP seen per task slot; 0 = task has not reached a probe yet.
-/// Only thread-mode tasks call [probe] (no preemption between them), so the
-/// ThreadModeRawMutex is sound and cheap.
-static MIN_SP: Mutex<ThreadModeRawMutex, RefCell<[usize; TASK_NAMES.len()]>> =
-    Mutex::new(RefCell::new([0; TASK_NAMES.len()]));
+/// Lowest MSP seen per task slot plus a loop-iteration count; min_sp == 0
+/// means the task has not reached a probe yet. Only thread-mode tasks call
+/// [probe] (no preemption between them), so the ThreadModeRawMutex is sound
+/// and cheap.
+#[derive(Clone, Copy)]
+struct TaskStat {
+    min_sp: usize,
+    loops: u32,
+}
 
-/// Record the current MSP as this task's watermark. Call from a task's main
-/// loop (and optionally its deep helpers); a handful of instructions.
+static STATS: Mutex<ThreadModeRawMutex, RefCell<[TaskStat; TASK_NAMES.len()]>> =
+    Mutex::new(RefCell::new([TaskStat { min_sp: 0, loops: 0 }; TASK_NAMES.len()]));
+
+/// Record the current MSP and one loop iteration for this task. Call from a
+/// task's main loop (and optionally its deep helpers); a handful of
+/// instructions.
 pub fn probe(slot: usize) {
     let sp = cortex_m::register::msp::read() as usize;
-    MIN_SP.lock(|c| {
-        let mut c = c.borrow_mut();
-        if c[slot] == 0 || sp < c[slot] {
-            c[slot] = sp;
+    STATS.lock(|c| {
+        let s = &mut c.borrow_mut()[slot];
+        s.loops = s.loops.wrapping_add(1);
+        if s.min_sp == 0 || sp < s.min_sp {
+            s.min_sp = sp;
         }
     });
 }
@@ -103,16 +114,32 @@ pub fn usage() -> (u32, u32) {
     }
 }
 
-/// This task's min free bytes (deepest probed SP - stack bottom); None if the
-/// task has not run a probe yet. Smaller = this task's polls dig deeper into
-/// the shared stack; the values are not additive across tasks.
-pub fn task_free(slot: usize) -> Option<u32> {
+/// (this task's min free bytes, its loop-iteration count). free = deepest
+/// probed SP - stack bottom; None if the task has not run a probe yet.
+/// Smaller free = this task's polls dig deeper into the shared stack; the
+/// values are not additive across tasks.
+pub fn task_stat(slot: usize) -> (Option<u32>, u32) {
     let lo = unsafe { core::ptr::addr_of!(_stack_end) as usize };
-    let m = MIN_SP.lock(|c| c.borrow()[slot]);
-    if m == 0 {
-        None
+    let s = STATS.lock(|c| c.borrow()[slot]);
+    if s.min_sp == 0 {
+        (None, s.loops)
     } else {
-        Some((m.saturating_sub(lo)) as u32)
+        (Some((s.min_sp.saturating_sub(lo)) as u32), s.loops)
+    }
+}
+
+/// Statics footprint of the main SRAM (everything below the stack region):
+/// total SRAM minus the shared stack.
+pub fn statics_bytes() -> u32 {
+    128 * 1024 - usage().1
+}
+
+/// (used, total) of the CCM region (.ccm.bss: socket buffers etc.).
+pub fn ccm_usage() -> (u32, u32) {
+    unsafe {
+        let s = core::ptr::addr_of!(__sccm) as usize;
+        let e = core::ptr::addr_of!(__eccm) as usize;
+        ((e.saturating_sub(s)) as u32, 64 * 1024)
     }
 }
 

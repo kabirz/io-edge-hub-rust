@@ -269,67 +269,72 @@ fn reg_write(addr: u16, value: u16) -> bool {
 fn cmd_help() {
     log::line("commands:");
     log::line("  help    this help");
-    log::line("  tasks   task list (state / priority / stack free/total)");
+    log::line("  tasks   task list (embassy: stack watermarks, loops, RAM)");
     log::line("  reboot  graceful reboot (history sync + ~3s)");
     log::line("  io      io-edge-hub debug commands ('io help')");
 }
 
-/// State/priority per row, parallel to stackmark::TASK_NAMES (the real task
-/// inventory of this firmware — embassy has no runtime introspection, so the
-/// rows are the spawn sites). The stack column is each task's own measured
-/// min-free/total of the shared main stack: every task polls at a different
-/// depth, recorded by stackmark::probe at their loop entries.
-const TASK_META: [(char, u16); 20] = [
-    ('B', 0),
-    ('B', 0),
-    ('B', 0),
-    ('B', 0),
-    ('B', 0),
-    ('B', 1),
-    ('B', 1),
-    ('B', 1),
-    ('B', 1),
-    ('B', 1),
-    ('B', 1),
-    ('B', 1),
-    ('B', 1),
-    ('B', 1),
-    ('B', 1),
-    ('B', 1),
-    ('B', 1),
-    ('B', 1),
-    ('B', 1),
-    ('R', 1),
-];
-const _: () = assert!(TASK_META.len() == crate::stackmark::TASK_NAMES.len());
+/// Compact iteration count for the loops column (1.2M / 45K / 891).
+fn fmt_cnt(n: u32) -> heapless::String<8> {
+    let mut s = heapless::String::new();
+    if n >= 1_000_000 {
+        let _ = core::fmt::write(&mut s, core::format_args!("{}.{}M", n / 1_000_000, n / 100_000 % 10));
+    } else if n >= 10_000 {
+        let _ = core::fmt::write(&mut s, core::format_args!("{}K", n / 1000));
+    } else {
+        let _ = core::fmt::write(&mut s, core::format_args!("{}", n));
+    }
+    s
+}
 
+/// Embassy-native task listing: per-task stack watermark of the ONE shared
+/// stack (no per-task stacks exist), loop-iteration counts as liveness, and
+/// a whole-system RAM ledger. Nothing here mimics the FreeRTOS ps shape.
 fn cmd_tasks() {
     let (gfree, total) = crate::stackmark::usage();
-    log::line("task              st  prio  stack       num");
+    log::line("task              stack free/total  loops");
     for (i, name) in crate::stackmark::TASK_NAMES.iter().enumerate() {
-        let (st, prio) = TASK_META[i];
+        let (free, loops) = crate::stackmark::task_stat(i);
         let mut stk = heapless::String::<16>::new();
-        match crate::stackmark::task_free(i) {
-            Some(free) => {
-                let _ = core::fmt::write(&mut stk, core::format_args!("{}/{}", free, total));
+        match free {
+            Some(f) => {
+                let _ = core::fmt::write(&mut stk, core::format_args!("{}/{}", f, total));
             }
             None => {
                 let _ = stk.push('-');
             }
         }
+        let cnt = fmt_cnt(loops);
         let mut s = heapless::String::<64>::new();
         let _ = core::fmt::write(
             &mut s,
-            core::format_args!("{:<16} {}   {:<4}  {:<10}  {}", name, st, prio, &stk, i),
+            core::format_args!("{:<16} {:<11} {}", name, &stk, &cnt),
         );
         log::line(&s);
     }
-    log::line("st: X=running R=ready B=blocked S=suspended");
-    log::line("stack = free/total bytes, per task watermark of the shared");
     let mut s = heapless::String::<64>::new();
     let _ = core::fmt::write(
         &mut s,
-        core::format_args!("main stack (not additive); whole-stack min free {}/{}", gfree, total),
+        core::format_args!("{} tasks, 1 async executor (cooperative)", crate::stackmark::TASK_NAMES.len()),
+    );
+    log::line(&s);
+    let mut s = heapless::String::<64>::new();
+    let _ = core::fmt::write(
+        &mut s,
+        core::format_args!("stack min free {}/{} since boot (tasks+IRQ)", gfree, total),
+    );
+    log::line(&s);
+    let (ccm_used, ccm_total) = crate::stackmark::ccm_usage();
+    let mut s = heapless::String::<96>::new();
+    let _ = core::fmt::write(
+        &mut s,
+        core::format_args!(
+            "ram: statics {} + stack {} of 131072 SRAM; ccm {}/{}",
+            crate::stackmark::statics_bytes(),
+            total,
+            ccm_used,
+            ccm_total
+        ),
     );
     log::line(&s);
 }
