@@ -41,12 +41,27 @@ target_link_libraries(${PROJECT_NAME} PRIVATE
     setupapi
 )
 
+# 在线协议自测 (控制台): 与 GUI 同一份协议源码 (udp_manager/fw_image),
+# 跑 GUI 的完整调用序列, 便于改协议后随时回归. 用法见 tests/protocol_test.c 头注.
+add_executable(protocol_test
+    tests/protocol_test.c
+    src/udp_manager.c
+    src/fw_image.c
+)
+
+target_compile_definitions(protocol_test PRIVATE _CRT_SECURE_NO_WARNINGS)
+
+target_link_libraries(protocol_test PRIVATE ws2_32 iphlpapi)
+
 if(MINGW)
     target_compile_options(${PROJECT_NAME} PRIVATE -Os -municode -finput-charset=UTF-8 -fexec-charset=GBK)
     target_link_options(${PROJECT_NAME} PRIVATE -mwindows -municode -static-libgcc -s)
+    target_compile_options(protocol_test PRIVATE -Os -finput-charset=UTF-8 -fexec-charset=GBK)
+    target_link_options(protocol_test PRIVATE -static-libgcc -s)
 elseif(MSVC)
     target_compile_options(${PROJECT_NAME} PRIVATE /utf-8)
     target_link_options(${PROJECT_NAME} PRIVATE /SUBSYSTEM:WINDOWS)
+    target_compile_options(protocol_test PRIVATE /utf-8)
 endif()
 
 target_compile_definitions(${PROJECT_NAME} PRIVATE

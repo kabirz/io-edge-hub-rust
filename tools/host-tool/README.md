@@ -37,14 +37,14 @@ embassy-boot 固件的 bootloader 不含 CAN,勾选后会在探测阶段超时�
 
 ## 协议层联机自测
 
-`tests\build_test.cmd` 会把 `tests\protocol_test.c` 与本工具自己的
-`src/udp_manager.c`、`src/fw_image.c` 编成控制台程序(GUI 无法自动化,
-这里跑的是同一份协议代码的完整调用序列):
+`protocol_test` 目标随 CMake 一起编译(`tests/protocol_test.c` 与本工具
+自己的 `src/udp_manager.c`、`src/fw_image.c` 链成控制台程序——GUI 无法
+自动化,这里跑的是同一份协议代码的完整调用序列):
 
-    tests\build_test.cmd
-    out\protocol_test.exe 192.168.12.101 ..\..\build\app.dfu.bin
+    tools\build.bat
+    out\bin\Release\protocol_test.exe 192.168.12.101 ..\..\build\app.dfu.bin
 
 流程 = GET_VERSION → FW_START(常量 keyhash) → FW_DATA_V2 窗口流 →
 FW_END(设备端 ed25519 验签) → REBOOT → 轮询等换机完成。注意会触发一次
-真实换机(同镜像安全,自动确认)。2026-08-25 实测(经转发链路):传输
-218,740B 用时 3.1s,验签 0.9s,重启换机 32s 后上线,PASS。
+真实换机(同镜像安全,自动确认)。2026-08-25 实测 ×2(经转发链路):传输
+218,740B 用时 3.1s,验签 ~1s,重启换机 32s 后上线,均 PASS。
