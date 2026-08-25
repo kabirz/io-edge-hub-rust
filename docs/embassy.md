@@ -249,7 +249,7 @@ cfg.rcc.ls = rcc::LsConfig::default_lse();  // RTC 走 LSE(VBAT 保持)
 
 与 C 版逐项相同。CAN 波特率表(§10)按 PCLK1=42MHz 计算,改时钟树必须同步改表。
 
-### 5.2 从 MCUboot 跳转来的环境清理(纯寄存器,但必须有)
+### 5.2 从 bootloader 跳转来的环境清理(纯寄存器,但必须有)
 
 bootloader 跳转前只做了 `__disable_irq` + 清 NVIC ICPR[0]。应用必须自己:
 
@@ -460,18 +460,23 @@ littlefs 目录轮转的整块擦除会秒级占用 NOR,与升级流竞争(§4.2
 
 ## 9. fw.rs:固件升级会话
 
+> **2026-08(feat/embassy-boot 分支)重写**:MCUboot 已换为 embassy-boot(见
+> crates/bootloader 与 README 分区表)。载荷 = 裸 app + 64B ed25519 签名
+> (SHA-512 摘要),签名在应用侧验(salty),swap 状态写在 NOR state 分区。
+
 移植 `fw_upg.c` 的状态机与**返回码契约**(0 ok / -2 keyhash 不符 / -3 busy / -1 其他):
 
 | 函数 | 职责 | C 对应 |
 |---|---|---|
-| `start(total, keyhash)` | 校验 keyhash → 整槽擦除(448K)→ 置 active | `fw_upg_start` |
+| `start(total, keyhash)` | 校验 keyhash → DFU 分区整擦(512K)→ 置 active | `fw_upg_start` |
 | `write(data)` | 256B 页缓冲,页满编程 NOR | `fw_upg_write` |
-| `finish(crc)` | 尾页冲刷 → 整镜像回读 CRC(UDP/WS 传入)→ TLV keyhash 校验 | `fw_upg_finish_ex` |
-| `boot_set_pending(permanent)` | 手写 MCUboot trailer(magic/image_ok/swap_info,MAX_ALIGN=8 布局) | `boot_set_pending` |
+| `finish(crc)` | 尾页冲刷 → 整载荷回读 CRC → salty ed25519 验签 | `fw_upg_finish_ex` |
+| `boot_set_pending(_permanent)` | state 分区写 SWAP 魔数(embassy-boot 语义) | `boot_set_pending` |
+| `boot_confirm()` | main 末尾确认本次换机(否则下次复位回滚) | — |
 | `received()/total()/active()` | 进度查询(流控应答用) | `fw_upg_received` 等 |
 
 三通道差异在 `finish` 的 CRC 参数:UDP/WS 带主机算的 CRC16(`Some`),CAN CONFIRM 不带
-(`None` —— C 版 `fw_upg_finish_ex(0, false)` 同语义,完整性由 MCUboot RSA 验签兜底,
+(`None` —— C 版 `fw_upg_finish_ex(0, false)` 同语义,完整性由 ed25519 验签兜底,
 本版早期曾误将 None 当 0 比较导致 CONFIRM 恒失败,§17-坑 6)。
 
 锁:整个会话状态 `FW: Mutex<ThreadModeRawMutex, RefCell<FwSession>>`,论证与坑见 §4.2、§17-坑 1。
@@ -637,14 +642,15 @@ host 单测因此能全量跑协议层。
 
 ```
 MEMORY {
-  FLASH : ORIGIN = 0x08010200, LENGTH = 0x6FE00   /* MCUboot 头 512B 之后 */
+  FLASH : ORIGIN = 0x08020000, LENGTH = 0x60000    /* embassy-boot active 分区(3×128K) */
   RAM   : ORIGIN = 0x20000000, LENGTH = 128K
   CCRAM : ORIGIN = 0x10000000, LENGTH = 64K
 }
 ```
 
-- 应用链接在 0x08010200(imgtool `--header-size 512 --pad-header` 的配套地址),
-  slot0 共 448K@0x08010000。
+- 应用链接在 0x08020000(embassy-boot active 分区,裸镜像无头,向量表在分区首;
+  0x08000000-0x0801FFFF 留给 bootloader,实测 ~9K)。
+  旧布局(MCUboot 0x08010200/448K)见 git main 分支。
 - `.ccm.bss` 段:CCRAM 只 CPU 可达(DMA 不可!)—— 放 smoltcp 套接字缓冲、任务栈缓冲;
   **绝不**放 W5500 State(§6.3)。
 - 段由 linker script 定义为 NOLOAD,main 里手动清零(§5.3)。
@@ -672,4 +678,4 @@ MEMORY {
 - 多实例任务体内不能定义 `StaticCell`(二次实例化 panic),缓冲从 main 传入(§5.3)。
 - `Signal` 旧值滞留会假唤醒,跨任务状态用原子、事件用 Channel(§4.5)。
 - `accept()` 绑定地址必须 `None` 而非 `Some(0.0.0.0)`(§7.1)。
-- MCUboot 跳转进应用前要自清 VTOR/NVIC/EXTI/PRIMASK,否则一开中断进 DefaultHandler(§5.2)。
+- bootloader 跳转进应用前要自清 VTOR/NVIC/EXTI/PRIMASK,否则一开中断进 DefaultHandler(§5.2)。
