@@ -659,8 +659,8 @@ static DWORD WINAPI can_upgrade_thread(LPVOID arg)
 		 * 新固件 (无 swap 标记, 不走 SWAP_SCRATCH), 无需再发 REBOOT */
 		post_log(L"救援模式完成: 已写 slot0, MCUboot 验证后启动新固件, 无需重启");
 	} else {
-		/* app 模式: 数据写 slot1, CONFIRM 仅置 swap 标记 (boot_request_upgrade),
-		 * 须重启设备才触发 MCUboot SWAP_SCRATCH 交换 slot1→slot0。
+		/* app 模式 (embassy-boot): 数据写 NOR DFU 暂存分区, CONFIRM 通过
+		 * ed25519 验签后写 state SWAP 魔数, 须重启设备才触发逐页换机。
 		 * 重启由升级完成弹窗的『立即重启』按钮 (或本页『重启』按钮) 触发 */
 		post_log(L"CAN 升级完成, 请重启设备完成 embassy-boot 换机 DFU→active (可在弹窗或本页『重启』按钮操作)");
 	}
@@ -1031,11 +1031,11 @@ static LRESULT CALLBACK upg_wndproc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM l
 				L"升级完成", MB_ICONINFORMATION | MB_OK);
 			/* MCUboot 验证+启动新固件需数秒, 5s 后自动查版本刷新显示 */
 			SetTimer(g_upg.hSelf, UPG_BOOT_OK_TIMER_ID, UPG_BOOT_OK_WAIT_MS, NULL);
-		} else {
-				/* CAN/UDP app 模式: 数据在 slot1, 仅置了 swap 标记,
-				 * 须重启设备才完成 MCUboot 交换 → 弹窗提示 + 立即重启按钮.
-				 * pending_reboot 标记 "升级成功待重启": 弹窗选否后手动点
-				 * 『重启』也能进入 重启中+定时器确认 流程 */
+			} else {
+				/* CAN/UDP app 模式 (embassy-boot): 数据在 NOR DFU 暂存分区,
+				 * 已写 state SWAP 魔数, 须重启设备才完成逐页换机 → 弹窗提示 +
+				 * 立即重启按钮. pending_reboot 标记 "升级成功待重启": 弹窗选否后
+				 * 手动点『重启』也能进入 重启中+定时器确认 流程 */
 				SetWindowTextW(g_upg.hStatus, L"升级成功 (待重启)");
 				g_upg.pending_reboot = true;
 				if (MessageBoxW(g_hMain,
@@ -1058,7 +1058,7 @@ static LRESULT CALLBACK upg_wndproc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM l
 						log_append_ptr(L"重启命令发送失败, 请手动断电重启设备");
 					}
 				} else {
-					log_append_ptr(L"请稍后重启设备完成 MCUboot 交换 (本页『重启』按钮或断电重启)");
+					log_append_ptr(L"请稍后重启设备完成 embassy-boot 换机 (本页『重启』按钮或断电重启)");
 				}
 			}
 		} else {
@@ -1072,7 +1072,7 @@ static LRESULT CALLBACK upg_wndproc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM l
 	}
 
 	case WM_TIMER:
-		/* 升级后重启确认: 设备应已完成 MCUboot 交换并带新固件上线,
+		/* 升级后重启确认: 设备应已完成 embassy-boot 换机并带新固件上线,
 		 * 查一次版本收尾; 未响应则提示用户手动确认 */
 		if (wParam == UPG_REBOOT_TIMER_ID) {
 			KillTimer(hWnd, UPG_REBOOT_TIMER_ID);
