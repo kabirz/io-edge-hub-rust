@@ -1042,11 +1042,7 @@ fn build_info_json(out: &mut heapless::String<704>) {
 \"hclk_mhz\":168,\"flash_kb\":512,\"sram_kb\":192,\"mac\":\"{:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x}\",\
 \"ip\":\"{}.{}.{}.{}\",\"slave_id\":{},\"rs485_baud\":{},\"can_id\":{},\"can_baud\":{},\
 \"uptime_ms\":{},\"time\":{},\"hist_en\":{},\"lfs_free\":{},\"lfs_total\":{},\"net_up\":{},\
-\"di_ms\":{},\"ai_ms\":{},\
-\"keyhash\":\"{}\"}}",
-        // keyhash (hex of SHA-256(pubkey)): public fingerprint — host tools
-        // and the web page fetch it here so a key rotation only touches the
-        // firmware, never the clients
+\"di_ms\":{},\"ai_ms\":{}",
         version::FW_VERSION,
         version::FW_BUILD,
         mac[0], mac[1], mac[2], mac[3], mac[4], mac[5],
@@ -1066,19 +1062,14 @@ fn build_info_json(out: &mut heapless::String<704>) {
         link,
         g(rm::HOLDING_DI_SAMPLE_MS_IDX),
         g(rm::HOLDING_AI_SAMPLE_MS_IDX),
-        {
-            // format FW_KEYHASH as lowercase hex (32B -> 64 chars)
-            let kh = io_edge_hub_proto::fw_upg::FW_KEYHASH;
-            const N: usize = 64;
-            let mut buf = [0u8; N];
-            const HEX: &[u8; 16] = b"0123456789abcdef";
-            for (i, b) in kh.iter().enumerate() {
-                buf[i * 2] = HEX[(b >> 4) as usize];
-                buf[i * 2 + 1] = HEX[(b & 0xF) as usize];
-            }
-            core::str::from_utf8(&buf).unwrap_or("")
-        },
     );
+    // public key fingerprint: host tools and the web page fetch it here so
+    // a key rotation only touches the firmware, never the clients
+    let _ = write!(out, ",\"keyhash\":\"");
+    for b in io_edge_hub_proto::fw_upg::FW_KEYHASH {
+        let _ = write!(out, "{:02x}", b);
+    }
+    let _ = write!(out, "\"}}");
 }
 
 fn build_io_json(out: &mut heapless::String<256>) {
