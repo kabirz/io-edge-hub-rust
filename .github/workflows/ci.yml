@@ -1,0 +1,100 @@
+name: CI
+
+on:
+  push:
+    branches: [main, feat/embassy-boot]
+  pull_request:
+    branches: [main, feat/embassy-boot]
+
+env:
+  CARGO_TERM_COLOR: always
+  # Override the default ARM target for host-side jobs
+  HOST_TARGET: x86_64-unknown-linux-gnu
+
+jobs:
+  # ── Lint: fmt + clippy on host-testable crates ──────────────────────
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7.0.1
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Formatting
+        run: cargo fmt --all -- --check
+
+      - name: Clippy (proto — host target)
+        run: cargo clippy -p io-edge-hub-proto --target ${{ env.HOST_TARGET }}
+
+  # ── Test: host-side unit tests ─────────────────────────────────────
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7.0.1
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Proto unit tests
+        run: cargo test -p io-edge-hub-proto --target ${{ env.HOST_TARGET }}
+
+  # ── Build: cross-compile firmware + sign ────────────────────────────
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7.0.1
+        with:
+          fetch-depth: 0   # full history for git hash in version string
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: thumbv7em-none-eabihf
+          components: llvm-tools
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: arm
+
+      - name: Install ARM toolchain
+        uses: carlosperate/arm-none-eabi-gcc-action@v1
+        with:
+          release: '14.2.Rel1'
+
+      - name: Install cargo-binstall
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-binstall
+
+      - name: Install cargo-binutils
+        run: cargo binstall -y cargo-binutils
+
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+
+      - name: Install Python deps
+        run: pip install cryptography
+
+      - name: Build firmware
+        run: cargo build --release
+
+      - name: Sign + merge image
+        run: python tools/sign.py
+
+      - name: Upload firmware artifacts
+        uses: actions/upload-artifact@v7.0.1
+        with:
+          name: firmware
+          path: |
+            build/boot.bin
+            build/app.bin
+            build/app.dfu.bin
+            build/full.bin
+            build/full.hex
+          retention-days: 30

@@ -1,6 +1,5 @@
 /target
 /build
-/keys
 tools/host-tool/out/
 *.pem
 *.log

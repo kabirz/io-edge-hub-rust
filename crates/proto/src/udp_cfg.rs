@@ -247,8 +247,8 @@ pub fn udp_cmd_bcast_allowed(cmd: u8) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::regmap::{RegHooks, RegMap};
     use crate::fw_upg;
+    use crate::regmap::{RegHooks, RegMap};
     use std::cell::RefCell;
 
     struct MockHooks {
