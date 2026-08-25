@@ -510,31 +510,20 @@ fn cmd_io_info() {
     );
     log::line(&s);
 
-    // RTC keeps UTC; display with the +8h offset (epoch -> civil date)
-    let lt = systime::now_epoch() as i64 + 8 * 3600;
-    let days = lt.div_euclid(86_400);
-    let secs = lt.rem_euclid(86_400);
-    let z = days + 719_468;
-    let era = if z >= 0 { z } else { z - 146_096 } / 146_097;
-    let doe = (z - era * 146_097) as u64;
-    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
-    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
-    let mp = (5 * doy + 2) / 153;
-    let d = doy - (153 * mp + 2) / 5 + 1;
-    let m = if mp < 10 { mp + 3 } else { mp - 9 };
-    let y = era * 400 + yoe as i64 + if m <= 2 { 1 } else { 0 };
+    // RTC keeps UTC; display in the local timezone
+    let c = io_edge_hub_proto::time_math::unix_to_civil(systime::now_epoch_local());
     let mut s = heapless::String::<64>::new();
-    if y >= 2020 {
+    if c.year >= 2020 {
         let _ = core::fmt::write(
             &mut s,
             core::format_args!(
                 "time    : {:04}-{:02}-{:02} {:02}:{:02}:{:02} ({})",
-                y,
-                m,
-                d,
-                secs / 3600,
-                (secs / 60) % 60,
-                secs % 60,
+                c.year,
+                c.month,
+                c.day,
+                c.hour,
+                c.min,
+                c.sec,
                 systime::now_epoch()
             ),
         );

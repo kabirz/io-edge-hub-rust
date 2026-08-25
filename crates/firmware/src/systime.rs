@@ -38,6 +38,14 @@ pub fn now_epoch() -> u32 {
     EPOCH.load(Ordering::Relaxed)
 }
 
+/// Local timezone offset for display (UTC+8). The RTC keeps UTC.
+pub const LOCAL_OFFSET_SECS: u32 = 8 * 3600;
+
+/// Epoch advanced to the local timezone (for log/display clock fields).
+pub fn now_epoch_local() -> u32 {
+    now_epoch() + LOCAL_OFFSET_SECS
+}
+
 /// 1 Hz tick from the heartbeat task.
 pub fn tick_1hz() {
     EPOCH.fetch_add(1, Ordering::Relaxed);

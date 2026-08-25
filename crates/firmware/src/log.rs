@@ -5,12 +5,10 @@
 
 use core::fmt::Write as _;
 
-use crate::systime;
 use crate::uart_raw;
 
 pub fn log(level: char, msg: &str) {
-    let epoch = systime::now_epoch();
-    let secs = epoch % 86_400;
+    let secs = crate::systime::now_epoch_local() % 86_400;
     let mut line = heapless::String::<160>::new();
     let _ = write!(
         line,
