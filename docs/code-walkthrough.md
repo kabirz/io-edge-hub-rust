@@ -539,6 +539,16 @@ SPI1 阻塞轮询 @42MHz(无 DMA 无中断——驱动被 ThreadModeRawMutex 保
   引导 ACTIVE——宁可放弃 OTA 能力也不变砖;
 - 跳转前关中断 + 清 NVIC ICER/ICPR(应用的启动序列依赖这个契约)。
 
+> **FAQ:为什么 ACTIVE 不做成 480K、跨全部非均匀扇区"吃满"片内 flash?**
+> 三个断言挡路(`boot_loader.rs::assert_partitions`):① 页 = max(两 flash 的
+> ERASE_SIZE) = 128K,480K % 128K ≠ 0 直接 panic;② DFU ≥ ACTIVE + 1 页,
+> 等大的 DFU 不合法;③ 若谎报小页让检查通过,页边界落进大扇区内部时擦一页
+> 会抹掉同扇区里尚未备份(或刚换入)的邻居 → 首次升级即砖。唯一能过检查的
+> 变体是把整个 ACTIVE 报成一整页(ERASE_SIZE := 容量),但换区要求 DFU =
+> 2×ACTIVE = 960K,在外部 NOR 上与配置/littlefs 分区撞车,只能整体上移并
+> 失去与 C 版互挂磁盘的兼容——用 +96K 应用余量(现余量已 177K)换兼容性,
+> 不值。
+
 **fw.rs 会话层**:三条通道(UDP v2、WebSocket 二进制、CAN)共用一个会话,
 flash 操作全部走 storage 任务 RPC(FwBegin/FwProg/FwRead/FwMarkUpdated):
 
