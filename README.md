@@ -87,7 +87,9 @@ probe-rs reset --chip STM32F407VETx
 
 `full.bin`(boot ≤128K + app)= 整机制造镜像(0x08000000 整片)。
 升级私钥 `keys/ed25519.key` 不入仓(已 gitignore,绝不提交);公钥/SHA-256 keyhash
-固化在 `proto::fw_upg`(换钥匙需同步改常量并重编两个固件)。
+固化在 `proto::fw_upg`。**换钥匙只改固件这一处**(过渡固件用旧钥签名推上去);
+上位机/网页运行时向设备获取 keyhash(UDP 0x15 / `/api/info`),详见
+docs/firmware-upgrade.md 的轮换流程。
 
 ## 测试
 

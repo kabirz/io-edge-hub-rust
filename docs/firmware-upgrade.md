@@ -162,6 +162,7 @@ GET_VERSION 轮询     ──►  应答版本
 | 0x03 END | `[03][test u8][crc LE16]` | `[03][ok]` | ok=1:CRC 回读 + ed25519 验签 + SWAP 魔数全部通过。test 字节保留兼容,新方案忽略(恒为试运行+自动确认)。耗时 ~1s |
 | 0x05 REBOOT | `[05]` | `[05 01]` | 应答在网后才复位:历史同步 → 100ms → 复位 |
 | 0x04 GET_VERSION | `[04]` | 定长 14B:`[04]["v"][maj]['.'][min]['.'][pat]['_'][git 6B ASCII]` | 例 `04 76 30 2e 33 2e 30 5f 61 61 30 64 65 32` = `v0.3.0_aa0de2`;换机后轮询它等设备回来 |
+| 0x15 GET_KEYHASH | `[15]` | `[15][keyhash 32B]` | 设备自报验签公钥指纹;上位机升级前经**同一条 UDP 通道**获取,换钥匙零同步 |
 
 诊断(不经会话门面,随时可用):
 
@@ -245,8 +246,21 @@ python tools\sign.py
 | `app.dfu.bin` | **升级载荷**(三通道通用,含 64B 签名) |
 | `full.bin` / `full.hex` | 整机制造镜像 = boot 补 0xFF 到 0x08020000 + app.bin |
 
-换密钥流程:重跑 `gen_ed25519.py` → 把打印的 PUBKEY_HEX/KEYHASH_HEX 更新到
-`crates/proto/src/fw_upg.rs`(`FW_PUBKEY`/`FW_KEYHASH`)→ 重编两个固件。
+换密钥(轮换)流程——**上位机与网页零同步**,只改固件一处:
+
+1. 重跑 `gen_ed25519.py`(产物:`.key` 私钥 / `.pub` 公钥 / `.keyhash` 32B 指纹文件);
+2. 把打印的 PUBKEY_HEX/KEYHASH_HEX 更新到 `crates/proto/src/fw_upg.rs`
+   (`FW_PUBKEY`/`FW_KEYHASH`)→ 重编固件;
+3. **过渡固件用旧私钥签名**(现役设备只认旧钥)→ 正常推送换机;
+4. 之后所有镜像用新私钥签。
+
+各端 keyhash 获取途径(不再写死):
+
+| 端 | 途径 | 兜底 |
+|---|---|---|
+| Web 页面 | `/api/info` 的 `keyhash` 字段(浏览器不能发 UDP) | 旧固件无字段 → 不带 keyhash,验签兜底 |
+| UDP 工具(fwupd_udp / 上位机) | **UDP 0x15 设备自报**(与升级同通道) | `keys/ed25519.pub` 现算 / 内置常量(过渡期可用) |
+| 上位机 CAN 通道(设备无 IP) | exe 旁 `ed25519.keyhash` 文件 | 内置常量(过渡期可用) |
 
 ### 5.2 SWD 烧写(制造/恢复)
 

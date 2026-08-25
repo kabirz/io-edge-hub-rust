@@ -10,18 +10,19 @@
 |---|---|---|
 | 升级载荷 | imgtool 签名镜像(magic+TLV) | `app.dfu.bin` = 裸镜像 + 尾部 64B ed25519 签名 |
 | 载荷校验 | 解析 MCUboot 头 + TLV info | 长度 ∈ (64B, 512K];识别旧 MCUboot magic 并明确拒绝 |
-| keyhash | 从镜像 KEYHASH TLV 提取 | 编译期常量 SHA-256(ed25519 公钥) |
+| keyhash | 从镜像 KEYHASH TLV 提取 | **设备自报**:UDP 通道升级前问设备(0x15);CAN 通道读 exe 旁 `ed25519.keyhash`;兜底内置常量 |
 | 验签 | bootloader 端 RSA | 设备应用端 salty ed25519(FW_END 时,约 1s) |
 | 换机语义 | slot1 + trailer,SWAP_USING_SCRATCH | DFU 暂存 + state 魔数,重启后逐页互换(约 30s) |
 | 升级后 | 重启即换 | 重启换机,新镜像跑通 main 自动确认,否则自动回滚 |
 
 改动文件:`src/fw_image.c`、`include/fw_image.h`(重写)、`src/upgrade_tab.c`
-(浏览校验/keyhash 取用 + 用户可见文案)、`CMakeLists.txt`(工程名
-`io-edge-hub-host`)。其余源文件(UDP/CAN/Modbus/历史解析)wire 协议与本
-固件一致,原样拷贝。
+(浏览校验/keyhash 取用 + 用户可见文案)、`src/udp_manager.c/h`(GET_KEYHASH)、
+`CMakeLists.txt`(工程名 `io-edge-hub-host`)。其余源文件(CAN/Modbus/历史解析)
+wire 协议与本固件一致,原样拷贝。
 
-keyhash 常量与固件 `proto::fw_upg::FW_KEYHASH`、`tools/fwupd_udp.py` 同源;
-换钥匙(`tools/gen_ed25519.py`)时三处同步更新并重编两端。
+换钥匙只改固件一处(`proto::fw_upg` + 重编);本工具 UDP 通道向设备要 keyhash,
+CAN 通道把 `tools/gen_ed25519.py` 产出的 `keys/ed25519.keyhash` 拷到 exe 旁即可。
+内置常量仅作过渡期兜底(旧钥签名的过渡固件仍可用它完成轮换)。
 
 注:CAN 救援模式勾选框仅对旧 C/Zephyr 固件有效(0x106/0x107 探测应答);
 embassy-boot 固件的 bootloader 不含 CAN,勾选后会在探测阶段超时。
