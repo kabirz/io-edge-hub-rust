@@ -55,6 +55,10 @@ fn main() {
     .unwrap();
     println!("cargo:rerun-if-changed={}", root.join("VERSION").display());
     println!("cargo:rerun-if-changed={}", root.join(".git").join("HEAD").display());
+    // .git/HEAD content does not change on a commit (it stays "ref:
+    // refs/heads/main"); the branch ref file does — watch the whole refs
+    // dir so a fresh commit refreshes the hash baked into fw_version.rs
+    println!("cargo:rerun-if-changed={}", root.join(".git").join("refs").display());
     println!("cargo:rerun-if-env-changed=FW_GIT_DIR");
 
     // gzip the SPA into a byte asset (CMake's web_index_gz.h equivalent)
