@@ -381,7 +381,7 @@ footer{text-align:center;color:#b6bcc9;font-size:12px;padding-top:8px}
 	</div>
 </section>
 
-<footer>io-edge-hub · STM32F407VET6 · FreeRTOS</footer>
+<footer>io-edge-hub · STM32F407VET6 · Rust/embassy</footer>
 </main>
 </div>
 
@@ -620,7 +620,7 @@ function applyCfg(){
 		if(r.ok===true){cfgDirty=false;toast("配置已写入，重启后生效","ok")}
 		else toast("写入失败: "+(r.err||"参数非法"),"err")};
 	if(!wsSendCmd(o,done)){
-		/* WS 不在线 (FreeRTOS 版 httpd 暂无 /ws): cfg 走 HTTP 回退 */
+		/* WS 不在线: cfg 走 HTTP 回退 */
 		const body={...o};delete body.cmd;
 		api("/api/cfg",{method:"POST",body:JSON.stringify(body)})
 			.then(done).catch(()=>done({ok:false,err:"http failed"}));

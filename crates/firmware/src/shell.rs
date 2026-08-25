@@ -269,41 +269,47 @@ fn reg_write(addr: u16, value: u16) -> bool {
 fn cmd_help() {
     log::line("commands:");
     log::line("  help    this help");
-    log::line("  tasks   task list (state / priority / min stack)");
+    log::line("  tasks   task list (state / priority / stack free/total)");
     log::line("  reboot  graceful reboot (history sync + ~3s)");
     log::line("  io      io-edge-hub debug commands ('io help')");
 }
 
 /// Static task table (embassy tasks have no introspection; same shape as
-/// uxTaskGetSystemState output).
-const TASK_TABLE: &[(&str, char, u16, u16)] = &[
-    ("embassy-main", 'B', 0, 2048),
-    ("hb", 'B', 0, 512),
-    ("net-poll", 'B', 0, 1024),
-    ("udp-cfg", 'B', 0, 512),
-    ("storage", 'B', 1, 1024),
-    ("mbtcp1", 'B', 1, 512),
-    ("mbtcp2", 'B', 1, 512),
-    ("http1", 'B', 1, 1024),
-    ("http2", 'B', 1, 1024),
-    ("ftp1", 'B', 1, 1024),
-    ("ftp2", 'B', 1, 1024),
-    ("ftp3", 'B', 1, 1024),
-    ("rtu", 'B', 1, 512),
-    ("sh", 'R', 1, 640),
+/// uxTaskGetSystemState output). Embassy runs all tasks on one shared main
+/// stack, so the per-row stack figure is the real measured free/total of that
+/// stack (min watermark since boot) — there are no per-task stacks to report.
+const TASK_TABLE: &[(&str, char, u16)] = &[
+    ("embassy-main", 'B', 0),
+    ("hb", 'B', 0),
+    ("net-poll", 'B', 0),
+    ("udp-cfg", 'B', 0),
+    ("storage", 'B', 1),
+    ("mbtcp1", 'B', 1),
+    ("mbtcp2", 'B', 1),
+    ("http1", 'B', 1),
+    ("http2", 'B', 1),
+    ("ftp1", 'B', 1),
+    ("ftp2", 'B', 1),
+    ("ftp3", 'B', 1),
+    ("rtu", 'B', 1),
+    ("sh", 'R', 1),
 ];
 
 fn cmd_tasks() {
-    log::line("task              st  prio  stack  num");
-    for (i, (name, st, prio, stack)) in TASK_TABLE.iter().enumerate() {
+    let (free, total) = crate::stackmark::usage();
+    let mut stk = heapless::String::<16>::new();
+    let _ = core::fmt::write(&mut stk, core::format_args!("{}/{}", free, total));
+    log::line("task              st  prio  stack       num");
+    for (i, (name, st, prio)) in TASK_TABLE.iter().enumerate() {
         let mut s = heapless::String::<64>::new();
         let _ = core::fmt::write(
             &mut s,
-            core::format_args!("{:<16} {}   {:<4}  {:<5}  {}", name, st, prio, stack, i),
+            core::format_args!("{:<16} {}   {:<4}  {:<10}  {}", name, st, prio, &stk, i),
         );
         log::line(&s);
     }
-    log::line("st: X=running R=ready B=blocked S=suspended; stack = min free (words)");
+    log::line("st: X=running R=ready B=blocked S=suspended");
+    log::line("stack = free/total bytes (single shared main stack, min since boot)");
 }
 
 fn cmd_reboot() {

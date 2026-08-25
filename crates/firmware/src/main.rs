@@ -14,6 +14,7 @@ mod reboot;
 mod rtu;
 mod sampling;
 mod shell;
+mod stackmark;
 mod storage;
 mod systime;
 mod uart_raw;
@@ -89,6 +90,9 @@ async fn main(spawner: Spawner) {
             p = p.add(1);
         }
     }
+    // stack watermark pattern for `tasks`/`ps` (must precede embassy init:
+    // from here on every deeper frame belongs to the runtime, not the boot)
+    stackmark::init();
     let dp = embassy_stm32::init(board_config());
 
     // console + shell UART: raw USART1 (uart_raw) — sync TX for the logger,
