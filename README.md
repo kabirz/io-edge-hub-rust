@@ -95,6 +95,8 @@ python can_upgrade.py             # TOOLMODE=1 模拟 io-edge-hub 上位机的 8
 
 ## 文档
 
+- **[docs/code-walkthrough.md](docs/code-walkthrough.md) — 代码详解**(逐文件讲解全部
+  源码:proto 纯逻辑库、firmware 各任务/驱动、并发模型与内存布局、C 移植保留的怪癖清单)
 - **[docs/embassy.md](docs/embassy.md) — 按子模块的 embassy 详细文档**(执行模型、中断绑定、
   同步原语、各外设驱动用法、内存布局、以及本项目踩过的 8 个坑)
 - [docs/comparison-c-vs-rust.md](docs/comparison-c-vs-rust.md) — 与 C 版的逐功能对比和性能基准
