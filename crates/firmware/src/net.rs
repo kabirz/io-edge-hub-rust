@@ -182,7 +182,7 @@ pub async fn setup(spawner: &embassy_executor::Spawner, p: NetPins) -> &'static 
 #[embassy_executor::task]
 async fn net_run_task(runner: W5500Runner<'static>) {
     // runner.run() never returns; the single probe marks this task's frame
-    crate::stackmark::probe(crate::stackmark::slot::NET_RUN);
+    crate::stackmark::probe("net-run");
     runner.run().await
 }
 
@@ -190,7 +190,7 @@ async fn net_run_task(runner: W5500Runner<'static>) {
 async fn net_stack_task(
     mut runner: embassy_net::Runner<'static, embassy_net_driver_channel::Device<'static, 1514>>,
 ) {
-    crate::stackmark::probe(crate::stackmark::slot::NET_STACK);
+    crate::stackmark::probe("net-stack");
     runner.run().await
 }
 
@@ -225,7 +225,7 @@ async fn udp_task(stack: Stack<'static>) {
 
     let mut rx = [0u8; 1500];
     loop {
-        crate::stackmark::probe(crate::stackmark::slot::UDP);
+        crate::stackmark::probe("udp-cfg");
         let (n, meta) = match sock.recv_from(&mut rx).await {
             Ok(v) => v,
             Err(_) => continue,

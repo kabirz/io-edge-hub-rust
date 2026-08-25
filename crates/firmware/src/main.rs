@@ -199,7 +199,7 @@ async fn main(spawner: Spawner) {
     spawner.spawn(
         mbtcp::conn_task(
             *stack,
-            stackmark::slot::MBTCP1,
+            "mbtcp1",
             MB_RX1.init([0u8; 512]),
             MB_TX1.init([0u8; 512]),
         )
@@ -208,7 +208,7 @@ async fn main(spawner: Spawner) {
     spawner.spawn(
         mbtcp::conn_task(
             *stack,
-            stackmark::slot::MBTCP2,
+            "mbtcp2",
             MB_RX2.init([0u8; 512]),
             MB_TX2.init([0u8; 512]),
         )
@@ -236,7 +236,7 @@ async fn main(spawner: Spawner) {
     spawner.spawn(
         httpd::http_task(
             *stack,
-            stackmark::slot::HTTP1,
+            "http1",
             HTTP_RX1.init([0u8; 640]),
             HTTP_TX1.init([0u8; 2048]),
         )
@@ -245,7 +245,7 @@ async fn main(spawner: Spawner) {
     spawner.spawn(
         httpd::http_task(
             *stack,
-            stackmark::slot::HTTP2,
+            "http2",
             HTTP_RX2.init([0u8; 640]),
             HTTP_TX2.init([0u8; 2048]),
         )
@@ -373,7 +373,7 @@ async fn main(spawner: Spawner) {
         .expect("spawn ai"),
     );
     log::inf("io: DI16/AI4 sampling, rtu up");
-    stackmark::probe(stackmark::slot::MAIN);
+    stackmark::probe("embassy-main");
 }
 
 #[embassy_executor::task]
@@ -386,7 +386,7 @@ async fn heartbeat(
     let mut ticker = Ticker::every(Duration::from_millis(100));
     let mut ticks: u32 = 0;
     loop {
-        stackmark::probe(stackmark::slot::HB);
+        stackmark::probe("hb");
         ticker.next().await;
         ticks = ticks.wrapping_add(1);
         if ticks == 1 {

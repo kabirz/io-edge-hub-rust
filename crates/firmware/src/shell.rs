@@ -357,7 +357,8 @@ fn fmt_cnt(n: u32) -> heapless::String<8> {
 
 /// Embassy-native task listing: per-task stack watermark of the ONE shared
 /// stack (no per-task stacks exist), loop-iteration counts as liveness, and
-/// a whole-system RAM ledger. Nothing here mimics the FreeRTOS ps shape.
+/// a whole-system RAM ledger. Rows come from the runtime task register
+/// (tasks self-register by name on their first stackmark probe).
 fn cmd_tasks() {
     let (gfree, total) = crate::stackmark::usage();
     // header uses the same width specifiers as the rows so the columns line up
@@ -367,8 +368,10 @@ fn cmd_tasks() {
         core::format_args!("{:<16} {:<16} {}", "task", "stack free/total", "loops"),
     );
     log::line(&hdr);
-    for (i, name) in crate::stackmark::TASK_NAMES.iter().enumerate() {
-        let (free, loops) = crate::stackmark::task_stat(i);
+    for i in 0..crate::stackmark::task_count() {
+        let Some((name, free, loops)) = crate::stackmark::task_stat(i) else {
+            continue;
+        };
         let mut stk = heapless::String::<16>::new();
         match free {
             Some(f) => {
@@ -391,7 +394,7 @@ fn cmd_tasks() {
         &mut s,
         core::format_args!(
             "{} tasks, 1 async executor (cooperative)",
-            crate::stackmark::TASK_NAMES.len()
+            crate::stackmark::task_count()
         ),
     );
     log::line(&s);
@@ -977,7 +980,7 @@ fn io_dispatch(args: &[&str]) {
 }
 
 fn dispatch(line: &[u8], n: usize) {
-    crate::stackmark::probe(crate::stackmark::slot::SH);
+    crate::stackmark::probe("sh");
     // split on blanks (in-place)
     let mut argv: [&str; ARG_MAX] = [""; ARG_MAX];
     let mut argc = 0usize;
@@ -1074,7 +1077,7 @@ pub async fn shell_task() {
     loop {
         let c = getchar().await;
         let mut arrow = false;
-        crate::stackmark::probe(crate::stackmark::slot::SH);
+        crate::stackmark::probe("sh");
 
         if esc != 0 {
             if esc == 1 && (c == b'[' || c == b'O') {

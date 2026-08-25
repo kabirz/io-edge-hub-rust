@@ -133,7 +133,7 @@ pub async fn fw_can_task(
     let mut key_chunk_mask: u8 = 0;
 
     loop {
-        crate::stackmark::probe(crate::stackmark::slot::FWCAN);
+        crate::stackmark::probe("fwcan");
         let env = match rx.read().await {
             Ok(env) => env,
             Err(_) => continue,

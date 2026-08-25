@@ -39,7 +39,7 @@ pub struct DiPins(pub [Peri<'static, AnyPin>; 16]);
 pub async fn di_task(pins: DiPins) {
     let inputs: [Input<'static>; 16] = pins.0.map(|p| Input::new(p, Pull::Down));
     loop {
-        crate::stackmark::probe(crate::stackmark::slot::DI);
+        crate::stackmark::probe("di");
         let (si, en) = critical_section::with(|_cs| {
             REGS.lock(|r| {
                 let r = r.borrow();
@@ -81,7 +81,7 @@ pub async fn ai_task(p: AdcPins) {
     let mut adc: Adc<'static, embassy_stm32::peripherals::ADC1> = Adc::new(p.adc1);
     let (mut c0, mut c1, mut c2, mut c3) = (p.ch0, p.ch1, p.ch2, p.ch3);
     loop {
-        crate::stackmark::probe(crate::stackmark::slot::AI);
+        crate::stackmark::probe("ai");
         let (si, en) = critical_section::with(|_cs| {
             REGS.lock(|r| {
                 let r = r.borrow();
