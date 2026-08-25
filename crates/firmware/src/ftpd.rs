@@ -37,6 +37,7 @@ pub async fn ftp_task(
     ctrl.set_timeout(Some(Duration::from_secs(120)));
     data.set_timeout(Some(Duration::from_secs(15)));
     loop {
+        crate::stackmark::probe(crate::stackmark::slot::FTP_BASE + slot as usize);
         if ctrl.accept(FTP_PORT).await.is_err() {
             Timer::after_millis(100).await;
             continue;
@@ -62,6 +63,7 @@ pub async fn ftp_reject_task(
     let mut sock = TcpSocket::new(stack, rx_buf, tx_buf);
     sock.set_timeout(Some(Duration::from_secs(5)));
     loop {
+        crate::stackmark::probe(crate::stackmark::slot::FTP_REJECT);
         if FTP_BUSY.load(Ordering::Relaxed) >= 3 {
             match select(sock.accept(FTP_PORT), Timer::after_millis(50)).await {
                 Either::First(Ok(())) => {
@@ -122,6 +124,7 @@ async fn session(ctrl: &mut TcpSocket<'static>, data: &mut TcpSocket<'static>, s
     let mut rbuf = [0u8; 1024];
     let mut rx_len = 0usize;
     while !s.quit {
+        crate::stackmark::probe(crate::stackmark::slot::FTP_BASE + slot as usize);
         let n = match ctrl.read(&mut rbuf[rx_len..]).await {
             Ok(0) => {
                 crate::log::wrn("ftp: ctrl eof");

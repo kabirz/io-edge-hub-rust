@@ -304,6 +304,9 @@ pub static CFG: Mutex<CriticalSectionRawMutex, RefCell<(Option<u32>, u32)>> =
     Mutex::new(RefCell::new((None, 0)));
 
 pub fn nor_with<R>(f: impl FnOnce(&mut W25q) -> R) -> Option<R> {
+    // leaf-most Rust frame for flash ops: probing here attributes the NOR
+    // busy-wait depth (the deepest storage path) to the storage task
+    crate::stackmark::probe(crate::stackmark::slot::STORAGE);
     NOR.lock(|r| r.borrow_mut().as_mut().map(f))
 }
 
@@ -738,6 +741,7 @@ pub async fn storage_task() {
     let fs: &'static mut Filesystem<'static, LfsNor> = unsafe { core::mem::transmute(&mut fs) };
     let mut st = HistState::new();
     loop {
+        crate::stackmark::probe(crate::stackmark::slot::STORAGE);
         // both lanes polled concurrently; when both are ready the executor
         // may pick either, but a full QUEUE can no longer block control cmds
         let cmd = match embassy_futures::select::select(

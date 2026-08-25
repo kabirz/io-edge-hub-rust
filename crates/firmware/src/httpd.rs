@@ -31,28 +31,35 @@ static INDEX_GZ: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/index_html.gz
 static WS_ACTIVE: AtomicBool = AtomicBool::new(false);
 
 #[embassy_executor::task(pool_size = 2)]
-pub async fn http_task(stack: Stack<'static>, rx_buf: &'static mut [u8; RX_BUF], tx_buf: &'static mut [u8; 2048]) {
+pub async fn http_task(
+    stack: Stack<'static>,
+    slot: usize,
+    rx_buf: &'static mut [u8; RX_BUF],
+    tx_buf: &'static mut [u8; 2048],
+) {
     let mut sock = TcpSocket::new(stack, rx_buf, tx_buf);
     sock.set_timeout(Some(Duration::from_secs(75))); // > 60s keep-alive idle
     loop {
+        crate::stackmark::probe(slot);
         if sock.accept(HTTP_PORT).await.is_err() {
             Timer::after_millis(100).await;
             continue;
         }
-        serve(&mut sock).await;
+        serve(&mut sock, slot).await;
         sock.abort();
         Timer::after_millis(10).await;
     }
 }
 
 /// One connection: request/response cycles until close/timeout/error.
-async fn serve(sock: &mut TcpSocket<'static>) {
+async fn serve(sock: &mut TcpSocket<'static>, slot: usize) {
     let mut rbuf = [0u8; RX_BUF];
     let mut rx_len = 0usize;
     let mut rx_idle = Instant::now();
     let mut body = [0u8; BODY_MAX + 8];
 
     loop {
+        crate::stackmark::probe(slot);
         // 5s half-request timeout, 60s keep-alive idle (httpd.c)
         let limit = if rx_len > 0 { Duration::from_secs(5) } else { Duration::from_secs(60) };
         let n = match embassy_futures::select::select(

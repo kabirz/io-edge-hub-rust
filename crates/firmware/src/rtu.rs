@@ -64,6 +64,7 @@ pub async fn rtu_task(p: RtuPins) {
     let mut chunk = [0u8; 256];
     let mut tx_frame = [0u8; 1 + MB_SERVER_PDU_MAX + 2];
     loop {
+        crate::stackmark::probe(crate::stackmark::slot::RTU);
         // idle-line detection ends the read; remaining silence >= t3.5 spec
         let n = match rx.read_until_idle(&mut chunk).await {
             Ok(n) if n > 0 => n,

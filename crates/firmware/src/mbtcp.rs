@@ -20,17 +20,23 @@ pub const MBTCP_PORT: u16 = 502;
 pub static BUSY: core::sync::atomic::AtomicU8 = core::sync::atomic::AtomicU8::new(0);
 
 #[embassy_executor::task(pool_size = 2)]
-pub async fn conn_task(stack: Stack<'static>, rx_buf: &'static mut [u8; 512], tx_buf: &'static mut [u8; 512]) {
+pub async fn conn_task(
+    stack: Stack<'static>,
+    slot: usize,
+    rx_buf: &'static mut [u8; 512],
+    tx_buf: &'static mut [u8; 512],
+) {
     let mut sock = TcpSocket::new(stack, rx_buf, tx_buf);
     sock.set_timeout(Some(Duration::from_secs(120)));
     loop {
+        crate::stackmark::probe(slot);
         // port-only endpoint = addr None (ANY); Some(0.0.0.0) would NOT match
         if sock.accept(MBTCP_PORT).await.is_err() {
             Timer::after_millis(100).await;
             continue;
         }
         BUSY.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
-        serve(&mut sock).await;
+        serve(&mut sock, slot).await;
         BUSY.fetch_sub(1, core::sync::atomic::Ordering::Relaxed);
         // hard reset: instant Closed -> instantly reusable for the next
         // accept (graceful close lingers in FIN/TIME_WAIT states and leaves
@@ -52,6 +58,7 @@ pub async fn reject_task(stack: Stack<'static>, rx_buf: &'static mut [u8; 64], t
     let mut sock = TcpSocket::new(stack, rx_buf, tx_buf);
     sock.set_timeout(Some(Duration::from_secs(5)));
     loop {
+        crate::stackmark::probe(crate::stackmark::slot::MB_REJECT);
         if BUSY.load(core::sync::atomic::Ordering::Relaxed) >= 2 {
             match select(sock.accept(MBTCP_PORT), Timer::after_millis(50)).await {
                 Either::First(Ok(())) => {
@@ -74,7 +81,7 @@ fn mbap_frame_len(frame: &[u8]) -> usize {
     6 + u16::from_be_bytes([frame[4], frame[5]]).min(256) as usize
 }
 
-async fn serve(sock: &mut TcpSocket<'static>) {
+async fn serve(sock: &mut TcpSocket<'static>, slot: usize) {
     let mut rbuf = [0u8; 300]; // raw read chunks
     let mut frame = [0u8; 264]; // MBAP + PDU
     let mut flen = 0usize;
@@ -82,6 +89,7 @@ async fn serve(sock: &mut TcpSocket<'static>) {
     let mut out = [0u8; MBTCP_ADU_TX_MAX];
 
     loop {
+        crate::stackmark::probe(slot);
         if let Some(d) = deadline {
             if Instant::now() >= d {
                 return; // half-frame timeout

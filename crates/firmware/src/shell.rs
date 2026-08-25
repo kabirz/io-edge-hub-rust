@@ -274,33 +274,49 @@ fn cmd_help() {
     log::line("  io      io-edge-hub debug commands ('io help')");
 }
 
-/// Static task table (embassy tasks have no introspection; same shape as
-/// uxTaskGetSystemState output). Embassy runs all tasks on one shared main
-/// stack, so the per-row stack figure is the real measured free/total of that
-/// stack (min watermark since boot) — there are no per-task stacks to report.
-const TASK_TABLE: &[(&str, char, u16)] = &[
-    ("embassy-main", 'B', 0),
-    ("hb", 'B', 0),
-    ("net-poll", 'B', 0),
-    ("udp-cfg", 'B', 0),
-    ("storage", 'B', 1),
-    ("mbtcp1", 'B', 1),
-    ("mbtcp2", 'B', 1),
-    ("http1", 'B', 1),
-    ("http2", 'B', 1),
-    ("ftp1", 'B', 1),
-    ("ftp2", 'B', 1),
-    ("ftp3", 'B', 1),
-    ("rtu", 'B', 1),
-    ("sh", 'R', 1),
+/// State/priority per row, parallel to stackmark::TASK_NAMES (the real task
+/// inventory of this firmware — embassy has no runtime introspection, so the
+/// rows are the spawn sites). The stack column is each task's own measured
+/// min-free/total of the shared main stack: every task polls at a different
+/// depth, recorded by stackmark::probe at their loop entries.
+const TASK_META: [(char, u16); 20] = [
+    ('B', 0),
+    ('B', 0),
+    ('B', 0),
+    ('B', 0),
+    ('B', 0),
+    ('B', 1),
+    ('B', 1),
+    ('B', 1),
+    ('B', 1),
+    ('B', 1),
+    ('B', 1),
+    ('B', 1),
+    ('B', 1),
+    ('B', 1),
+    ('B', 1),
+    ('B', 1),
+    ('B', 1),
+    ('B', 1),
+    ('B', 1),
+    ('R', 1),
 ];
+const _: () = assert!(TASK_META.len() == crate::stackmark::TASK_NAMES.len());
 
 fn cmd_tasks() {
-    let (free, total) = crate::stackmark::usage();
-    let mut stk = heapless::String::<16>::new();
-    let _ = core::fmt::write(&mut stk, core::format_args!("{}/{}", free, total));
+    let (gfree, total) = crate::stackmark::usage();
     log::line("task              st  prio  stack       num");
-    for (i, (name, st, prio)) in TASK_TABLE.iter().enumerate() {
+    for (i, name) in crate::stackmark::TASK_NAMES.iter().enumerate() {
+        let (st, prio) = TASK_META[i];
+        let mut stk = heapless::String::<16>::new();
+        match crate::stackmark::task_free(i) {
+            Some(free) => {
+                let _ = core::fmt::write(&mut stk, core::format_args!("{}/{}", free, total));
+            }
+            None => {
+                let _ = stk.push('-');
+            }
+        }
         let mut s = heapless::String::<64>::new();
         let _ = core::fmt::write(
             &mut s,
@@ -309,7 +325,13 @@ fn cmd_tasks() {
         log::line(&s);
     }
     log::line("st: X=running R=ready B=blocked S=suspended");
-    log::line("stack = free/total bytes (single shared main stack, min since boot)");
+    log::line("stack = free/total bytes, per task watermark of the shared");
+    let mut s = heapless::String::<64>::new();
+    let _ = core::fmt::write(
+        &mut s,
+        core::format_args!("main stack (not additive); whole-stack min free {}/{}", gfree, total),
+    );
+    log::line(&s);
 }
 
 fn cmd_reboot() {
@@ -832,6 +854,7 @@ fn io_dispatch(args: &[&str]) {
 }
 
 fn dispatch(line: &[u8], n: usize) {
+    crate::stackmark::probe(crate::stackmark::slot::SH);
     // split on blanks (in-place like sh_split)
     let mut argv: [&str; ARG_MAX] = [""; ARG_MAX];
     let mut argc = 0usize;
@@ -928,6 +951,7 @@ pub async fn shell_task() {
     loop {
         let c = getchar().await;
         let mut arrow = false;
+        crate::stackmark::probe(crate::stackmark::slot::SH);
 
         if esc != 0 {
             if esc == 1 && (c == b'[' || c == b'O') {
