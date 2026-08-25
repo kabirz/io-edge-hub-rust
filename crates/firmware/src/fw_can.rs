@@ -3,8 +3,8 @@
 //! - protocol 0x101 cmd / 0x102 reply / 0x103 data / 0x104 keyhash
 //!   / 0x105 version frames; flow control acks every 64 B
 //! - START reopens unconditionally, keyhash only checked when all 5
-//!   frames arrived, CONFIRM carries no CRC (MCUboot signature gates),
-//!   REBOOT is not answered
+//!   frames arrived, CONFIRM carries no CRC (the ed25519 signature
+//!   verified in finish() gates), REBOOT is not answered
 
 use embassy_stm32::bind_interrupts;
 use embassy_stm32::can::filter::Mask16;
