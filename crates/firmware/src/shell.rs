@@ -360,7 +360,13 @@ fn fmt_cnt(n: u32) -> heapless::String<8> {
 /// a whole-system RAM ledger. Nothing here mimics the FreeRTOS ps shape.
 fn cmd_tasks() {
     let (gfree, total) = crate::stackmark::usage();
-    log::line("task              stack free/total  loops");
+    // header uses the same width specifiers as the rows so the columns line up
+    let mut hdr = heapless::String::<64>::new();
+    let _ = core::fmt::write(
+        &mut hdr,
+        core::format_args!("{:<16} {:<16} {}", "task", "stack free/total", "loops"),
+    );
+    log::line(&hdr);
     for (i, name) in crate::stackmark::TASK_NAMES.iter().enumerate() {
         let (free, loops) = crate::stackmark::task_stat(i);
         let mut stk = heapless::String::<16>::new();
@@ -376,7 +382,7 @@ fn cmd_tasks() {
         let mut s = heapless::String::<64>::new();
         let _ = core::fmt::write(
             &mut s,
-            core::format_args!("{:<16} {:<11} {}", name, &stk, &cnt),
+            core::format_args!("{:<16} {:<16} {}", name, &stk, &cnt),
         );
         log::line(&s);
     }
