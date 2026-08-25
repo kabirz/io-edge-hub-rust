@@ -59,9 +59,12 @@ W25Q,ed25519 签名在应用侧验签;NOR 上 IOCF 配置与 littlefs 历史区�
 │   └── littlefs2-sys/      # littlefs 2.11 vendored + libc shims
 ├── tools/sign.py           # objcopy + ed25519 签名 + full.bin 合成
 ├── tools/gen_ed25519.py    # 生成升级签名密钥对(keys/,不入仓)
+├── tools/fwupd_udp.py      # 命令行 UDP 升级客户端(零依赖)
+├── tools/host-tool/        # ★ Windows 上位机(C/Win32,四 tab GUI,tools\build.bat 构建)
 ├── build/                  # 产物 + CAN 测试脚本(can_upgrade.py 等)
 └── docs/
-    ├── embassy.md          # ★ 按子模块的 embassy 详细文档
+    ├── firmware-upgrade.md # ★ 升级原理/协议/操作详解
+    ├── embassy.md          # 按子模块的 embassy 详细文档
     └── comparison-c-vs-rust.md  # C/Rust 行为与性能对比报告
 ```
 

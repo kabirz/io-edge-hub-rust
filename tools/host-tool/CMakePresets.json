@@ -1,0 +1,34 @@
+{
+    "version": 7,
+    "cmakeMinimumRequired": { "major": 3, "minor": 25, "patch": 0 },
+    "configurePresets": [
+        {
+            "name": "mingw",
+            "displayName": "MinGW (Linux Cross-Compile)",
+            "generator": "Ninja",
+            "binaryDir": "${sourceDir}/build",
+            "cacheVariables": {
+                "CMAKE_SYSTEM_NAME": "Windows",
+                "CMAKE_C_COMPILER": "x86_64-w64-mingw32-gcc",
+                "CMAKE_RC_COMPILER": "x86_64-w64-mingw32-windres"
+            }
+        },
+        {
+            "name": "vs",
+            "displayName": "Visual Studio (Windows Native)",
+            "binaryDir": "${sourceDir}/out"
+        }
+    ],
+    "buildPresets": [
+        { "name": "mingw-release", "configurePreset": "mingw", "configuration": "Release" },
+        { "name": "mingw-debug",   "configurePreset": "mingw", "configuration": "Debug" },
+        { "name": "vs-release",    "configurePreset": "vs",    "configuration": "Release" },
+        { "name": "vs-debug",      "configurePreset": "vs",    "configuration": "Debug" }
+    ],
+    "workflowPresets": [
+        { "name": "mingw-release", "steps": [ {"type":"configure","name":"mingw"}, {"type":"build","name":"mingw-release"} ] },
+        { "name": "mingw-debug",   "steps": [ {"type":"configure","name":"mingw"}, {"type":"build","name":"mingw-debug"} ] },
+        { "name": "vs-release",    "steps": [ {"type":"configure","name":"vs"},    {"type":"build","name":"vs-release"} ] },
+        { "name": "vs-debug",      "steps": [ {"type":"configure","name":"vs"},    {"type":"build","name":"vs-debug"} ] }
+    ]
+}
