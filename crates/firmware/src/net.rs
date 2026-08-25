@@ -1,5 +1,4 @@
-//! W5500 MACRAW + embassy-net bring-up and the UDP :8600 config server
-//! (transport layer of src/net/udp_task.c).
+//! W5500 MACRAW + embassy-net bring-up and the UDP :8600 config server.
 
 use embassy_net::udp::{PacketMetadata, UdpSocket};
 use embassy_net::{IpAddress, IpEndpoint, Ipv4Address, Stack, StaticConfigV4};
@@ -44,7 +43,7 @@ type W5500Int = ExtiInput<'static, Async>;
 type W5500Runner<'a> =
     embassy_net_wiznet::Runner<'a, embassy_net_wiznet::chip::W5500, W5500SpiDevice<'a>, W5500Int, Output<'static>>;
 
-/// UID-derived MAC (main.c derive_mac_from_uid): Wiznet OUI + XOR-fold.
+/// UID-derived MAC: Wiznet OUI + XOR-fold of the 96-bit device UID.
 pub fn derive_mac_from_uid() -> [u8; 6] {
     let uid = embassy_stm32::uid::uid();
     [
@@ -57,7 +56,7 @@ pub fn derive_mac_from_uid() -> [u8; 6] {
     ]
 }
 
-// accessors for the web info JSON (httpd.c reads these via w5500_macraw_)
+// MAC exposed to the web info JSON
 pub static CUR_MAC: Mutex<CriticalSectionRawMutex, RefCell<[u8; 6]>> =
     Mutex::new(RefCell::new([0; 6]));
 
@@ -249,10 +248,9 @@ async fn udp_task(stack: Stack<'static>) {
             continue;
         }
 
-        // firmware-upgrade channel (fw_udp.c): 0x01/0x02/0x03/0x06.
-        // Synchronous here like the C worker's effect on timing: START's
-        // whole-slot erase (~1s) delays its reply, DATA_V2 page writes are
-        // millisecond-scale; the net stack keeps polling meanwhile.
+        // firmware-upgrade channel 0x01/0x02/0x03/0x06, handled inline:
+        // START's whole-slot erase (~1s) delays its reply and DATA_V2 page
+        // writes are millisecond-scale; the net stack keeps polling meanwhile.
         if let Some((rep, rlen)) = fw_udp_cmd(cmd, &rx[1..n]).await {
             if rlen > 0 {
                 sock.send_to(&rep[..rlen], meta.endpoint).await.ok();
@@ -328,18 +326,18 @@ async fn udp_task(stack: Stack<'static>) {
         };
         sock.send_to(&rep[..rlen], target).await.ok();
 
-        // reboot contract, io_reboot_cold() parity (udp_task.c): the reply is
-        // on the wire -> flush history -> 100ms -> reset INLINE. This task must
-        // go silent until the reset; a deadline polled in the background leaves
-        // a ~200ms window where GET_VERSION probes still get answered, so a
-        // host polling for "back online" reads the pre-reboot image (stale
-        // uptime) and later traffic dies mid-swap.
+        // reboot contract: the reply is on the wire -> flush history ->
+        // 100ms -> reset INLINE. This task must go silent until the reset; a
+        // deadline polled in the background leaves a ~200ms window where
+        // GET_VERSION probes still get answered, so a host polling for
+        // "back online" reads the pre-reboot image (stale uptime) and later
+        // traffic dies mid-swap.
         let reboot_now =
             critical_section::with(|_cs| UDP_STATE.lock(|st| st.borrow_mut().take_reboot_pending()));
         if reboot_now {
             crate::log::wrn("udp: delayed reboot");
-            // flush history before the swap reboot (history_sync in udp_task.c);
-            // the 100ms wait below also yields so the storage task can run it
+            // flush history before the swap reboot; the 100ms wait below
+            // also yields so the storage task can run it
             crate::storage::QUEUE
                 .try_send(crate::storage::StorageCmd::Sync)
                 .ok();
@@ -349,14 +347,14 @@ async fn udp_task(stack: Stack<'static>) {
     }
 }
 
-/// fw_udp.c command handlers; returns (reply, len) when the command was a
-/// firmware-channel one (None -> not ours, generic layer takes it).
+/// Firmware-channel command handlers; returns (reply, len) when the command
+/// was a firmware-channel one (None -> not ours, generic layer takes it).
 async fn fw_udp_cmd(cmd: u8, payload: &[u8]) -> Option<([u8; 8], usize)> {
     match cmd {
         // START [size LE32][keyhash 32B?] -> [01][status][v2_chunk LE16]
         0x01 => {
             if payload.len() < 4 {
-                return Some(([0; 8], 0)); // malformed: silent like the C gate
+                return Some(([0; 8], 0)); // malformed: silent
             }
             let total = u32::from_le_bytes([payload[0], payload[1], payload[2], payload[3]]);
             let kh: Option<&[u8; 32]> = if payload.len() >= 4 + 32 {
@@ -442,7 +440,7 @@ fn now_ms32() -> u32 {
     embassy_time::Instant::now().as_ticks() as u32 / (embassy_time::TICK_HZ as u32 / 1000)
 }
 
-/// Sender shares our /24 (udp_task.c same_subnet24).
+/// Sender shares our /24.
 fn same_subnet24(addr: &IpAddress) -> bool {
     // proto-ipv6 disabled: IpAddress is a single-variant (Ipv4-only) enum
     let IpAddress::Ipv4(v4) = *addr;

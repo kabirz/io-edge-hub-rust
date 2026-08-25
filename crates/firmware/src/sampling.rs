@@ -1,6 +1,6 @@
-//! DI16 sampling + AI4 sampling tasks, port of src/io/dio.c + adc.c:
+//! DI16 + AI4 sampling tasks:
 //! interval = reg 0x03/0x04 clamped [10,5000]ms, only enabled channels read,
-//! DI bitmap -> input_reg[5]; history records land in M3.
+//! DI bitmap -> input_reg[5]; history records land on the storage queue.
 
 use embassy_stm32::Peri;
 use embassy_stm32::adc::{Adc, SampleTime};
@@ -32,7 +32,7 @@ fn clamp_interval(v: u16) -> u64 {
     }
 }
 
-/// DI pins in channel order (dio.c di_pins).
+/// DI pins in board channel order.
 pub struct DiPins(pub [Peri<'static, AnyPin>; 16]);
 
 #[embassy_executor::task]
@@ -57,7 +57,7 @@ pub async fn di_task(pins: DiPins) {
                 r.borrow_mut().update_input(INPUT_DI_IDX as u16, val).ok();
             });
         });
-        // history record (dio.c: queued when any DI channel is enabled)
+        // history record: queued when any DI channel is enabled
         if en != 0 {
             send_history_data(HisData::di(crate::systime::now_epoch(), en, val));
         }
@@ -102,7 +102,7 @@ pub async fn ai_task(p: AdcPins) {
         sample!(c1, 1);
         sample!(c2, 2);
         sample!(c3, 3);
-        // history record (adc.c: queued when any AI channel is enabled)
+        // history record: queued when any AI channel is enabled
         if en & 0x000F != 0 {
             let values = critical_section::with(|_cs| {
                 REGS.lock(|r| {

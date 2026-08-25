@@ -1,6 +1,6 @@
-//! Modbus TCP server on :502, port of src/modbus/tcp.c semantics:
-//! max 2 concurrent masters, the 3rd connection is accepted then aborted.
-//! Diagnostics are shared with RTU through the global MbServer (mb_server.c).
+//! Modbus TCP server on :502: max 2 concurrent masters, the 3rd connection
+//! is accepted then aborted. Diagnostics are shared with RTU through the
+//! global MbServer.
 
 use embassy_net::tcp::TcpSocket;
 use embassy_net::Stack;
@@ -47,8 +47,7 @@ pub async fn conn_task(
 }
 
 /// Third listener: accepts the excess connection then immediately aborts it
-/// (tcp.c accepts-then-aborts when no serving slot is free — the client's
-/// connect() succeeds and its request dies with a reset).
+/// (the client's connect() succeeds and its request dies with a reset).
 /// Arms ONLY while both serving slots are busy and disarms within 50 ms of
 /// the load dropping — a lingering listener steals the next legit client
 /// (the FTP rejector had the same latch bug).
@@ -75,8 +74,8 @@ pub async fn reject_task(stack: Stack<'static>, rx_buf: &'static mut [u8; 64], t
 }
 
 /// Serve one connection: accumulate frames per MBAP length, 500ms half-frame
-/// deadline (mirrors src/modbus/tcp.c), single send per reply.
-/// Total on-wire length of the ADU in `frame` (MBAP length clamped like tcp.c).
+/// deadline, single send per reply.
+/// Total on-wire length of the ADU in `frame` (MBAP length clamped).
 fn mbap_frame_len(frame: &[u8]) -> usize {
     6 + u16::from_be_bytes([frame[4], frame[5]]).min(256) as usize
 }

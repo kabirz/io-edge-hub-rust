@@ -1,5 +1,4 @@
-//! USART1 console logging with the C firmware's line format
-//! `[HH:MM:SS.mmm][L] message`.
+//! USART1 console logging, line format `[HH:MM:SS.mmm][L] message`.
 //!
 //! TX is the raw-register poll in uart_raw (safe under critical sections);
 //! the shell's RX lives there too (DMA circular, freeze-proof).
@@ -37,13 +36,13 @@ pub fn err(msg: &str) {
     log('E', msg);
 }
 
-/// Untagged shell line (log_line in log.c): message + CRLF, no timestamp.
+/// Untagged shell line: message + CRLF, no timestamp.
 pub fn line(msg: &str) {
     raw(msg.as_bytes());
     raw(b"\r\n");
 }
 
-/// Raw bytes straight to the wire (log_raw): shell prompt/echo/redraw.
+/// Raw bytes straight to the wire: shell prompt/echo/redraw.
 pub fn raw(bytes: &[u8]) {
     uart_raw::write(bytes);
 }

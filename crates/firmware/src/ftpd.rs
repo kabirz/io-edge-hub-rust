@@ -1,4 +1,4 @@
-//! FTP server on :21, port of src/net/ftpd.c (RFC 959).
+//! FTP server on :21 (RFC 959).
 //! PASV/EPSV (self-picked ephemeral port) + PORT/EPRT active mode,
 //! TYPE A/I CR/LF conversion, REST both directions, APPE, ..-clamping
 //! path normalization, admin/admin + anonymous read-only, 3 sessions,
@@ -171,7 +171,7 @@ async fn session(ctrl: &mut TcpSocket<'static>, data: &mut TcpSocket<'static>, s
     }
 }
 
-/// Stack-based ".." clamping path normalization (ftpd.c norm_path).
+/// Stack-based ".." clamping path normalization.
 fn norm_path(cwd: &str, input: &str) -> heapless::String<64> {
     let mut parts: heapless::Vec<heapless::String<48>, 8> = heapless::Vec::new();
     let joined: heapless::String<160> = if input.starts_with('/') {
@@ -515,7 +515,7 @@ fn local_ip() -> [u8; 4] {
 }
 
 fn parse_port_arg(arg: &str) -> Option<IpEndpoint> {
-    // parsing lives in proto (host-tested); see ftp.rs hardening notes
+    // parsing lives in proto (host-tested)
     let (ip, port) = io_edge_hub_proto::ftp::parse_port_arg(arg)?;
     Some(IpEndpoint {
         addr: IpAddress::Ipv4(Ipv4Address::new(ip[0], ip[1], ip[2], ip[3])),

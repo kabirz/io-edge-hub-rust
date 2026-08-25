@@ -1,6 +1,5 @@
-//! HTTP server on :80, port of src/web/httpd.c + web_cmds.c:
-//! gzip SPA, JSON APIs, POST commands, keep-alive, pipelining, 405/404
-//! semantics, 2-connection cap, 128 B POST body limit.
+//! HTTP server on :80: gzip SPA, JSON APIs, POST commands, keep-alive,
+//! pipelining, 405/404 semantics, 2-connection cap, 128 B POST body limit.
 
 use core::fmt::Write as _;
 
@@ -27,7 +26,7 @@ const BODY_MAX: usize = 128;
 
 static INDEX_GZ: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/index_html.gz"));
 
-/// Single WS session (ws.c ws.active): the 2nd upgrade gets 503 "ws busy".
+/// Single WS session: the 2nd upgrade gets 503 "ws busy".
 static WS_ACTIVE: AtomicBool = AtomicBool::new(false);
 
 #[embassy_executor::task(pool_size = 2)]
@@ -55,12 +54,11 @@ pub async fn http_task(
 async fn serve(sock: &mut TcpSocket<'static>, slot: usize) {
     let mut rbuf = [0u8; RX_BUF];
     let mut rx_len = 0usize;
-    let mut rx_idle = Instant::now();
     let mut body = [0u8; BODY_MAX + 8];
 
     loop {
         crate::stackmark::probe(slot);
-        // 5s half-request timeout, 60s keep-alive idle (httpd.c)
+        // 5s half-request timeout, 60s keep-alive idle
         let limit = if rx_len > 0 { Duration::from_secs(5) } else { Duration::from_secs(60) };
         let n = match embassy_futures::select::select(
             sock.read(&mut rbuf[rx_len.min(RX_BUF - 1)..]),
@@ -77,8 +75,6 @@ async fn serve(sock: &mut TcpSocket<'static>, slot: usize) {
         };
         rx_len = (rx_len + n).min(RX_BUF - 1);
         rbuf[rx_len] = 0;
-        rx_idle = Instant::now();
-        let _ = rx_idle;
 
         // parse loop: possibly pipelined requests within the buffer
         loop {
@@ -191,7 +187,6 @@ fn find_hdr_end(rx: &[u8]) -> Option<usize> {
 /// sscanf "%7s %95s" equivalent: whitespace (space/tab) separated tokens.
 fn parse_request_line(rx: &[u8], m: &mut [u8; 8], t: &mut [u8; 96]) -> Option<(usize, usize)> {
     let mut i = 0usize;
-    // method
     while i < rx.len() && (rx[i] == b' ' || rx[i] == b'\t') {
         i += 1;
     }
@@ -204,7 +199,6 @@ fn parse_request_line(rx: &[u8], m: &mut [u8; 8], t: &mut [u8; 96]) -> Option<(u
     }
     m[..i - ms].copy_from_slice(&rx[ms..i]);
     let mlen = i - ms;
-    // target
     while i < rx.len() && (rx[i] == b' ' || rx[i] == b'\t') {
         i += 1;
     }
@@ -244,7 +238,7 @@ fn hdr_eq(hdr: &[u8], key: &[u8], want: &[u8]) -> bool {
     }
 }
 
-/// case-insensitive header lookup, value trimmed (httpd.c hdr_find)
+/// case-insensitive header lookup, value trimmed.
 fn hdr_find<'a>(hdr: &'a [u8], key: &[u8]) -> Option<&'a [u8]> {
     let mut i = 0usize;
     while i < hdr.len() {
@@ -314,7 +308,6 @@ async fn json_err(sock: &mut TcpSocket<'static>, status: &str, err: &str) {
 }
 
 async fn dispatch(sock: &mut TcpSocket<'static>, method: &str, target: &[u8], body: Option<&[u8]>) {
-    // strip query
     let (path, query) = match target.iter().position(|&b| b == b'?') {
         Some(q) => (&target[..q], Some(&target[q + 1..])),
         None => (target, None),
@@ -347,7 +340,6 @@ async fn dispatch(sock: &mut TcpSocket<'static>, method: &str, target: &[u8], bo
         return;
     }
     if is_get && path == "/api/history" {
-        // refresh the snapshot and wait for the storage task
         let seq = crate::storage::RPC_SEQ.load(Ordering::Relaxed);
         if crate::storage::QUEUE
             .try_send(crate::storage::StorageCmd::SnapReq)
@@ -355,7 +347,7 @@ async fn dispatch(sock: &mut TcpSocket<'static>, method: &str, target: &[u8], bo
         {
             let _ = rpc_wait(seq).await;
         }
-        // C builds this into HTTP_BODY_BUF 704 and stops ~64 B before the end
+        // buffer cap and margin of the C httpd, kept for byte-identical JSON
         let mut b = heapless::String::<704>::new();
         let _ = write!(b, "{{\"files\":[");
         let snap = critical_section::with(|_cs| {
@@ -406,7 +398,6 @@ async fn dispatch(sock: &mut TcpSocket<'static>, method: &str, target: &[u8], bo
             json_err(sock, "400 Bad Request", "invalid file name").await;
             return;
         }
-        // header + chunked body from the storage task
         let mut hdr = heapless::String::<256>::new();
         let _ = write!(
             hdr,
@@ -584,7 +575,7 @@ fn web_cmd_reg(addr: i32, value: i32) -> bool {
     })
 }
 
-/// POST /api/cfg validation (web_cmd_exec_cfg); None = ok, Some(err msg).
+/// POST /api/cfg validation: None = ok, Some(err msg).
 fn web_cmd_cfg(body: &[u8]) -> Option<&'static str> {
     if let Some(ip) = json_get_str(body, "ip") {
         let s = core::str::from_utf8(ip).ok()?;
@@ -643,7 +634,7 @@ fn web_cmd_cfg(body: &[u8]) -> Option<&'static str> {
 }
 
 
-// ==================== WebSocket (ws.c) ====================
+// ---- WebSocket ----
 
 /// Extract the 24-byte Sec-WebSocket-Key value from the request header.
 fn ws_extract_key(hdr: &[u8]) -> Option<[u8; 24]> {
@@ -680,7 +671,7 @@ async fn ws_session(sock: &mut TcpSocket<'static>, pending: &[u8]) {
     let mut out: heapless::Vec<u8, 768> = heapless::Vec::new();
     let mut scratch = [0u8; 800];
     let mut alive = true;
-    // fw upload CRC accumulated over accepted binary frames (ws.c ws.fw_crc)
+    // fw upload CRC accumulated over accepted binary frames
     let mut fw_crc = 0u16;
 
     // frames complete inside the sync parser: queue replies, flush after
@@ -693,7 +684,7 @@ async fn ws_session(sock: &mut TcpSocket<'static>, pending: &[u8]) {
             FeedEvent::Close => *alive = false,
             FeedEvent::Frame { fin, opcode, payload_len } => {
                 if !fin {
-                    // fragmented frames unsupported (ws_frame_done)
+                    // fragmented frames unsupported
                     ws_queue_frame(out, 0x8, &[]);
                     *alive = false;
                     return;
@@ -738,7 +729,7 @@ async fn ws_session(sock: &mut TcpSocket<'static>, pending: &[u8]) {
         return;
     }
 
-    // ~500ms to first push, then 1s io/regs + 10s info (ws_attach/ws_poll)
+    // ~500ms to first push, then 1s io/regs + 10s info
     let mut push_ticker = Ticker::every(Duration::from_millis(1000));
     let mut info_ticker = Ticker::every(Duration::from_millis(10_000));
     Timer::after_millis(500).await;
@@ -781,10 +772,9 @@ async fn ws_session(sock: &mut TcpSocket<'static>, pending: &[u8]) {
     }
 }
 
-/// WS commands (ws_handle_cmd): quick cmds queued as reply frames. The
-/// payload is the full JSON text; "cmd" selects the executor and the
-/// remaining fields are parsed from the same buffer (C passes the slice
-/// from the cmd value onward — same effect).
+/// WS commands: quick cmds queued as reply frames. The payload is the full
+/// JSON text; "cmd" selects the handler, remaining fields come from the same
+/// buffer.
 fn ws_handle_cmd(out: &mut heapless::Vec<u8, 768>, payload: &[u8], fw_crc: &mut u16) {
     let cmd = json_get_str(payload, "cmd").unwrap_or(b"");
     if cmd == b"do" {
@@ -894,8 +884,8 @@ fn ws_handle_cmd(out: &mut heapless::Vec<u8, 768>, payload: &[u8], fw_crc: &mut 
     ws_queue_frame(out, 0x1, b"{\"ok\":false,\"err\":\"unknown cmd\"}");
 }
 
-/// WS fw_end worker semantics (ws.c ws_fw_task): size precheck, CRC/TLV
-/// readback verify, request the swap, reply.
+/// WS fw_end: size precheck, CRC/TLV readback verify, request the swap,
+/// reply.
 fn ws_fw_end(fw_crc: &mut u16) -> &'static [u8] {
     let got = crate::fw::received();
     if got == 0 {
@@ -919,7 +909,7 @@ fn ws_fw_end(fw_crc: &mut u16) -> &'static [u8] {
     b"{\"ok\":true}"
 }
 
-// ==================== JSON builders (web_cmds.c) ====================
+// ---- JSON builders ----
 
 fn regs_snapshot() -> RegMap {
     critical_section::with(|_cs| REGS.lock(|r| {

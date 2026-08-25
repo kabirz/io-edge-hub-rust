@@ -1,11 +1,5 @@
-//! CAN1 firmware-upgrade channel (PA11 RX / PA12 TX, AF9), port of
-//! src/net/can.c + src/fw/fw_can.c:
+//! CAN1 firmware-upgrade channel (PA11 RX / PA12 TX, AF9).
 //!
-//! - bitrate = holding[0x07] (kbps), C table's supported set
-//!   {50,100,125,250,500,1000}; 800k is not realizable on 42MHz PCLK1 and
-//!   falls back to 250k like the C box
-//! - filter bank 0, 16-bit id-mask, FIFO0: half-slot A exact business ID
-//!   (holding[0x06]), half-slot B the 0x100-0x1FF upgrade range
 //! - protocol 0x101 cmd / 0x102 reply / 0x103 data / 0x104 keyhash
 //!   / 0x105 version frames; flow control acks every 64 B
 //! - START reopens unconditionally, keyhash only checked when all 5
@@ -63,15 +57,14 @@ const CONFIRM_MAGIC: u32 = 0x55AA_55AA;
 const KEYHASH_CHUNK: usize = 7;
 const KEYHASH_CHUNKS: usize = (upg::FW_KEYHASH_LEN + KEYHASH_CHUNK - 1) / KEYHASH_CHUNK;
 const KEYHASH_FULL_MASK: u8 = (1u16 << KEYHASH_CHUNKS) as u8 - 1;
-/// Flow control: OFFSET ack every 64 B (Zephyr authoritative
-/// libs/can_fw_upgrade handle_fw_data `fw_written % 64 == 0`). The host tool
-/// (io-edge-hub can_manager.c) reads a reply after every 8 frames/64 B and
-/// tolerates a missing one with a 2 s timeout — at 512 B (the FreeRTOS
-/// port's interval) it burns 7 timeouts per window, stretching a full push
-/// to >90 minutes.
+/// Flow control: OFFSET ack every 64 B (Zephyr authoritative semantics,
+/// `fw_written % 64 == 0`). The host tool reads a reply after every 8
+/// frames/64 B and tolerates a missing one with a 2 s timeout — at 512 B it
+/// burns 7 timeouts per window, stretching a full push to >90 minutes.
 const ACK_INTERVAL: u32 = 64;
 
-/// C can_timing_table's supported set (800k impossible at 42MHz).
+/// Supported bitrates (800k is not realizable at 42 MHz PCLK1; others fall
+/// back to 250k).
 const SUPPORTED_KBPS: [u32; 6] = [50, 100, 125, 250, 500, 1000];
 const FALLBACK_KBPS: u32 = 250;
 
@@ -98,7 +91,7 @@ pub async fn fw_can_task(
     let mut can = Can::new(can1, rx, tx, CanIrqs);
     can.set_bitrate(kbps * 1000);
 
-    // filter bank 0 / FIFO0, two 16-bit half-slots (layout per net/can.c):
+    // filter bank 0 / FIFO0, two 16-bit half-slots:
     // A = exact business ID, B = 0x100-0x1FF upgrade range
     let id_a = StandardId::new(id).unwrap();
     let id_b = StandardId::new(0x100).unwrap();
@@ -135,7 +128,7 @@ pub async fn fw_can_task(
     let _ = write!(msg, "fwcan: {}kbps bus id 0x{:03x}", kbps, id);
     crate::log::inf(&msg);
 
-    // keyhash accumulation (task-local, fw_can.c parity)
+    // keyhash accumulation (task-local)
     let mut rx_keybuf = [0u8; upg::FW_KEYHASH_LEN];
     let mut key_chunk_mask: u8 = 0;
 
@@ -160,7 +153,7 @@ pub async fn fw_can_task(
             KEYHASH_RX => {
                 handle_keyhash(data, &mut rx_keybuf, &mut key_chunk_mask);
             }
-            _ => {} // business frames: no consumer yet (dropped silently, C parity)
+            _ => {} // business frames: no consumer yet
         }
     }
 }
@@ -194,7 +187,7 @@ async fn handle_platform(
     match cmd {
         CMD_START_UPDATE => {
             // unconditional reopen: a failed previous transfer must not
-            // leave stale offsets around (fw_can.c)
+            // leave stale offsets around
             fw::abort();
             let kh = if *key_chunk_mask & KEYHASH_FULL_MASK == KEYHASH_FULL_MASK {
                 *key_chunk_mask = 0;
@@ -251,9 +244,8 @@ async fn handle_platform(
             }
         }
         CMD_REBOOT => {
-            // no reply (fw_can.c parity): ~100ms drain, flush the history
-            // cache, then reset inline — vTaskDelay(100) + log_flush(500)
-            // + history_sync() + NVIC_SystemReset()
+            // no reply: ~100ms drain, flush the history cache, then reset
+            // inline
             crate::log::inf("fwcan: reboot requested");
             Timer::after_millis(100).await;
             crate::storage::QUEUE

@@ -1,5 +1,4 @@
-//! DO/LED GPIO outputs (PD7-PD14 DO8, PE8-PE15 LED8 mirror) �� M1 wires the
-//! pins and the DO write path; DI sampling lands in M2.
+//! DO/LED GPIO outputs (PD7-PD14 DO8, PE8-PE15 LED8 mirror).
 
 use core::cell::RefCell;
 

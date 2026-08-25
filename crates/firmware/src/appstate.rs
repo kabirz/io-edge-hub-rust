@@ -25,7 +25,7 @@ pub static REGS: Mutex<CriticalSectionRawMutex, RefCell<RegMap>> =
 pub static UDP_STATE: Mutex<CriticalSectionRawMutex, RefCell<UdpCfgState>> =
     Mutex::new(RefCell::new(UdpCfgState::new()));
 
-/// Shared PDU server (global diagnostics, like mb_server.c's static counters).
+/// Shared PDU server (global diagnostics counters).
 pub static MB_SERVER: Mutex<CriticalSectionRawMutex, RefCell<MbServer>> =
     Mutex::new(RefCell::new(MbServer::new()));
 
@@ -62,8 +62,7 @@ pub fn reboot_due() {
     }
 }
 
-/// RegHooks bridging into real peripherals. DO GPIO wiring landed in M2;
-/// history/persistence land in M3 (queued to the storage task).
+/// RegHooks bridging the proto register map into real peripherals.
 pub struct Hooks;
 
 impl RegHooks for Hooks {

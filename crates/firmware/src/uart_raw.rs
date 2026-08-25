@@ -1,11 +1,11 @@
-//! Raw-register console UART: USART1 PA9/PA10 @115200 (log.c init 1:1).
+//! Raw-register console UART: USART1 PA9/PA10 @115200.
 //!
 //! Why not the embassy driver: the logger needs a sync TX usable from inside
 //! critical sections (TXE-poll on the register), and the shell RX must
 //! survive the millisecond PRIMASK freezes of NOR flash operations — a
 //! register-level RXNE interrupt loses bursts (1-byte DR + ORE), but a DMA2
 //! circular channel keeps draining the DR in hardware while interrupts are
-//! masked. TX stays busy-poll (log_raw semantics; PRIMASK-safe).
+//! masked. TX stays busy-poll (PRIMASK-safe).
 
 // ---- RCC ----
 const RCC_AHB1ENR: *mut u32 = 0x4002_3830 as *mut u32; // GPIOAEN | DMA2EN

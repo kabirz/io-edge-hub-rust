@@ -1,6 +1,5 @@
-//! Modbus RTU slave on USART2 (PA2 TX / PA3 RX) with DE pin PA1, port of
-//! src/modbus/rtu.c: baud + slave-id are startup snapshots (change requires
-//! reboot, like the C firmware).
+//! Modbus RTU slave on USART2 (PA2 TX / PA3 RX) with DE pin PA1: baud and
+//! slave-id are startup snapshots (change requires reboot).
 
 use embassy_stm32::bind_interrupts;
 use embassy_stm32::dma;
@@ -81,7 +80,7 @@ pub async fn rtu_task(p: RtuPins) {
             });
             if let Some(len) = reply {
                 de.set_high();
-                // DE setup time (rtu.c ~30us)
+                // DE setup time (~30us)
                 cortex_m::asm::delay(168 * 30);
                 let _ = tx.blocking_write(&tx_frame[..len]);
                 let _ = tx.blocking_flush();

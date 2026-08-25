@@ -1,9 +1,9 @@
-//! W25Q128 (16 MiB) SPI NOR driver, port of src/storage/w25qxx.c.
+//! W25Q128 (16 MiB) SPI NOR driver.
 //!
-//! Blocking SPI1 polling like the C firmware (no DMA, no interrupts). Every
-//! operation: CS low -> command (+24-bit big-endian address) -> data -> CS
-//! high. WREN before writes/erases; status-register busy polling with the
-//! IWDG fed inline (long erases must not reset the box).
+//! Blocking SPI1 polling (no DMA, no interrupts). Every operation: CS low ->
+//! command (+24-bit big-endian address) -> data -> CS high. WREN before
+//! writes/erases; status-register busy polling with the IWDG fed inline
+//! (long erases must not reset the box).
 
 use embassy_stm32::gpio::{Level, Output, Speed};
 use embassy_stm32::spi::{Config as SpiConfig, Spi};
@@ -26,7 +26,7 @@ const SECTOR_SIZE: u32 = 4096;
 
 const JEDEC_ID: u32 = 0xEF_4018; // Winbond + 128 Mbit
 
-// Datasheet max 4K=400ms / 32K=1600 / 64K=2000; 5-8x margin like the C code
+// Datasheet max 4K=400ms / 32K=1600 / 64K=2000; 5-8x margin
 const TMO_4K: u32 = 2000;
 const TMO_32K: u32 = 8000;
 const TMO_64K: u32 = 16000;
@@ -118,8 +118,8 @@ impl W25q {
         r.map(|_| sr[0]).map_err(|_| ())
     }
 
-    /// Poll the busy bit every ~1 ms, feeding the IWDG like w25qxx.c: a
-    /// full-partition format takes minutes and must not trip the watchdog.
+    /// Poll the busy bit every ~1 ms, feeding the IWDG: a full-partition
+    /// format takes minutes and must not trip the watchdog.
     fn wait_not_busy(&mut self, timeout_ms: u32) -> Result<(), ()> {
         for _ in 0..=timeout_ms {
             unsafe { core::ptr::write_volatile(0x4000_3000 as *mut u32, 0xAAAA) };
@@ -177,8 +177,8 @@ impl W25q {
         self.wait_not_busy(timeout_ms)
     }
 
-    /// Erase a 4 KiB-aligned region, preferring 64 K/32 K blocks when aligned
-    /// (same chunking strategy as w25_erase).
+    /// Erase a 4 KiB-aligned region, preferring 64 K/32 K blocks when
+    /// aligned.
     pub fn erase(&mut self, mut addr: u32, mut len: u32) -> Result<(), ()> {
         if len == 0 || addr % SECTOR_SIZE != 0 || len % SECTOR_SIZE != 0 || addr + len > CHIP_SIZE {
             return Err(());

@@ -1,10 +1,9 @@
 //! Storage task: W25Q NOR owner — config store A/B + littlefs history
-//! recorder (ports of config_store.c usage, lfs_port.c and history_file.c).
+//! recorder.
 //!
-//! Runs in a dedicated interrupt executor: NOR busy-polls (with inline IWDG
-//! feeds) preempt the async thread executor only for the duration of a single
-//! flash operation, so network/Modbus keep running. Producers talk to this
-//! task through [QUEUE] (history.c's queue semantics: full queue drops).
+//! NOR ops busy-wait for up to one flash operation, so producers never talk
+//! to the chip directly: they enqueue onto [QUEUE] (full queue drops, like
+//! the C history queue) or [CTRL_QUEUE] (control ops, never dropped).
 
 use core::cell::{RefCell, UnsafeCell};
 use core::mem::MaybeUninit;
@@ -33,7 +32,7 @@ use io_edge_hub_proto::regmap::{
 use crate::appstate::REGS;
 use crate::w25q::W25q;
 
-/// littlefs partition geometry (lfs_port.c PORT_* values, on-disk compat).
+/// littlefs partition geometry (on-disk compatible with the C firmware).
 pub(crate) const LFS_OFFSET: u32 = 0x000F_0000;
 const LFS_BLOCK_COUNT: usize = (0x0100_0000 - LFS_OFFSET as usize) / 4096;
 const BLOCK_CYCLES: isize = 512;
@@ -53,7 +52,7 @@ pub static CTRL_QUEUE: Channel<CriticalSectionRawMutex, StorageCmd, 4> = Channel
 pub enum StorageCmd {
     Write(HisData),
     /// Close the current file but keep its name: next write continues it
-    /// (disable -> enable semantics of history_file.c).
+    /// (history disable -> enable continuation).
     CloseKeepName,
     Sync,
     CfgSave,
@@ -98,8 +97,8 @@ pub enum FtpWrMode {
     Rest(u32),
 }
 
-/// Result register for one-shot FTP ops (single FTP op in flight at a time:
-/// the C server also serializes transfers).
+/// Result register for one-shot FTP ops (transfers are serialized: one FTP
+/// op in flight at a time).
 pub static FTP_RES: Mutex<CriticalSectionRawMutex, RefCell<(bool, bool, u32)>> =
     Mutex::new(RefCell::new((false, false, 0))); // (ok, is_dir, size)
 
@@ -107,10 +106,10 @@ pub static FTP_RES: Mutex<CriticalSectionRawMutex, RefCell<(bool, bool, u32)>> =
 pub static FTP_LS: Mutex<CriticalSectionRawMutex, RefCell<([[u8; 32]; 16], usize)>> =
     Mutex::new(RefCell::new(([ [0; 32]; 16 ], 0)));
 
-/// Root-listing + usage snapshot refreshed on SnapReq (history_web_list_json
-/// + history_web_usage). 16 entries x (20 B NUL-padded name + 4 B BE size):
-/// the C side caps the JSON at HTTP_BODY_BUF 704 (~13 entries), littlefs
-/// root can hold a few more during heavy test runs.
+/// Root-listing + usage snapshot refreshed on SnapReq. 16 entries x (20 B
+/// NUL-padded name + 4 B BE size): the web JSON is capped at ~13 entries by
+/// the HTTP body buffer, but the littlefs root can hold a few more during
+/// heavy test runs.
 pub struct FsSnap {
     pub entries: [[u8; 24]; 16],
     pub count: usize,
@@ -128,8 +127,8 @@ pub static FS_SNAP: Mutex<CriticalSectionRawMutex, RefCell<FsSnap>> =
         gen: 0,
     }));
 
-/// Persistent open history file (C's his_fp): kept open across records so a
-/// sampling append is one buffered write instead of open+write+close.
+/// Persistent open history file: kept open across records so a sampling
+/// append is one buffered write instead of open+write+close.
 /// Sound as !Send: single-core, every access under a critical section.
 struct OpenFile {
     file: Option<File<'static, 'static, LfsNor>>,
@@ -144,9 +143,8 @@ static OPEN_FILE: Mutex<CriticalSectionRawMutex, RefCell<Option<OpenFile>>> =
 /// file is open, so the allocation lives here, outside OPEN_FILE).
 struct AllocCell {
     cell: UnsafeCell<MaybeUninit<FileAllocation<LfsNor>>>,
-    /// explicit init marker — the old "is the cell still zero" guard
-    /// compared the cell's ADDRESS (never 0), so it never fired and
-    /// correctness rested on FileAllocation::new() happening to be all-zero
+    /// explicit init marker — the allocation must be created exactly once
+    /// at this stable address
     init: AtomicBool,
 }
 unsafe impl Sync for AllocCell {}
@@ -187,14 +185,14 @@ unsafe fn close_or_poison(f: File<'static, 'static, LfsNor>) -> bool {
     }
 }
 
-/// Persistent download handle (chunked reads continue sequentially — no
-/// reopen+seek per chunk, which made big downloads O(n^2)).
+/// Persistent read handle: chunked downloads continue sequentially instead
+/// of reopen+seek per chunk (O(n^2) with NOR reads).
 pub struct DlFile(pub Option<File<'static, 'static, LfsNor>>);
 unsafe impl Send for DlFile {}
 
-/// Per-session FTP transfer slot (3 sessions, ftpd.c cap): parallel data
-/// connections each own their handles + staging — the singletons above are
-/// HTTP-only. chunk doubles as the write staging (FtpWriteChunk len<=512).
+/// Per-session FTP transfer slot (parallel data connections own their
+/// handles + staging; the singletons above are HTTP-only). chunk doubles as
+/// the write staging (FtpWriteChunk len<=512).
 pub struct FtpXfer {
     pub dl: DlFile,
     pub wr: WrFile,
@@ -209,8 +207,7 @@ pub struct FtpXfer {
     pub wpos: usize, // write staging fill level
 }
 
-/// Persistent download handle for the HTTP path (chunked reads continue
-/// sequentially — no reopen+seek per chunk, which made big downloads O(n^2)).
+/// HTTP download handle (see [DlFile]).
 static DOWNLOAD_FILE: Mutex<CriticalSectionRawMutex, RefCell<DlFile>> =
     Mutex::new(RefCell::new(DlFile(None)));
 
@@ -299,7 +296,7 @@ pub static RPC_SEQ: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU3
 pub static NOR: Mutex<ThreadModeRawMutex, RefCell<Option<W25q>>> =
     Mutex::new(RefCell::new(None));
 
-/// Active config slot/generation (config_store.c statics).
+/// Active config slot/generation.
 pub static CFG: Mutex<CriticalSectionRawMutex, RefCell<(Option<u32>, u32)>> =
     Mutex::new(RefCell::new((None, 0)));
 
@@ -311,7 +308,7 @@ pub fn nor_with<R>(f: impl FnOnce(&mut W25q) -> R) -> Option<R> {
 }
 
 /// littlefs Storage over the shared NOR, offset by LFS_OFFSET. Writes split
-/// at 256 B pages like lf_prog.
+/// at 256 B NOR page boundaries.
 pub(crate) struct LfsNor;
 
 impl Storage for LfsNor {
@@ -353,8 +350,8 @@ impl Storage for LfsNor {
     }
 }
 
-/// Boot-time config load (config_store_init): read both slots, pick the
-/// winner, apply it to REGS. Blocking but only 2x40 B reads.
+/// Boot-time config load: read both slots, pick the newer generation,
+/// apply it to REGS. Blocking, but only 2x40 B reads.
 pub fn boot_config_load() {
     let mut ra = [0u8; cs::CFG_REC_LEN];
     let mut rb = [0u8; cs::CFG_REC_LEN];
@@ -447,7 +444,7 @@ fn cfg_save() {
     }
 }
 
-// ==================== history file core (history_file.c) ====================
+// ---- history file core ----
 
 /// Latest history file name retained across disable/enable; empty = rescan.
 struct HistState {
@@ -482,9 +479,9 @@ impl HistState {
     }
 }
 
-/// Flush buffered records of the open history file (C's history_sync):
-/// called before web listings/downloads and on explicit Sync — NOT per
-/// record (per-record sync re-commits the full inline data every write).
+/// Flush buffered records of the open history file. Called before web
+/// listings/downloads and on explicit Sync — NOT per record: every sync
+/// re-commits the file's full inline data.
 fn hist_sync() {
     let mut file = critical_section::with(|_cs| {
         OPEN_FILE.lock(|o| o.borrow_mut().as_mut().and_then(|h| h.file.take()))
@@ -503,7 +500,8 @@ fn hist_sync() {
     }
 }
 
-fn hist_write(fs: &mut Filesystem<'_, LfsNor>, st: &mut HistState, d: &HisData) {    let mut rec = d.to_bytes();
+fn hist_write(fs: &mut Filesystem<'_, LfsNor>, st: &mut HistState, d: &HisData) {
+    let mut rec = d.to_bytes();
     let rec = &mut rec[..d.rec_len()];
 
     // fast path: the open file stays open across records (C's his_fp) —
@@ -537,7 +535,7 @@ fn hist_write(fs: &mut Filesystem<'_, LfsNor>, st: &mut HistState, d: &HisData) 
                 });
                 return;
             }
-            rotated = true; // full or errored: rotate below
+            rotated = true;
         }
         None => rotated = true,
     }
@@ -678,7 +676,7 @@ fn cleanup_old_files(fs: &mut Filesystem<'_, LfsNor>) {
     }
 }
 
-// ==================== the task ====================
+// ---- the task ----
 
 #[embassy_executor::task]
 pub async fn storage_task() {
@@ -816,7 +814,7 @@ fn handle_cmd(fs: &mut Filesystem<'static, LfsNor>, st: &mut HistState, cmd: Sto
                 RPC_SEQ.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
             }
             StorageCmd::FtpLs(path) => {
-                hist_sync(); // flush so LIST shows the buffered tail (C parity)
+                hist_sync(); // flush so LIST shows the buffered tail
                 ftp_ls(&mut *fs, path);
                 RPC_SEQ.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
             }
@@ -872,7 +870,7 @@ fn handle_cmd(fs: &mut Filesystem<'static, LfsNor>, st: &mut HistState, cmd: Sto
     }
 }
 
-// ==================== FTP storage ops (ftpd.c littlefs access) ====================
+// ---- FTP storage ops ----
 
 enum FtpOp {
     Remove,
@@ -908,7 +906,7 @@ fn ftp_ls(fs: &mut Filesystem<'_, LfsNor>, path: FtpPath) {
             return;
         }
     };
-    // single file listed as a one-line directory (cmd_list LFS_TYPE_REG path)
+    // single file listed as a one-line directory
     if let Ok(md) = fs.metadata(p) {
         if !md.is_dir() {
             let b = p.as_str().as_bytes();
@@ -985,7 +983,7 @@ fn slot_close_all(slot: u8) {
     });
 }
 
-/// Open for chunked read at `rest` (cmd_retr + REST), session slot.
+/// Open for chunked read at `rest` offset, session slot.
 fn ftp_open_read(fs: &mut Filesystem<'_, LfsNor>, slot: u8, path: FtpPath, rest: u32) -> bool {
     let slot = (slot as usize).min(2);
     // close any stale handles (dl AND wr) so the alloc cell is unlinked
@@ -1142,7 +1140,7 @@ fn ftp_close_write(slot: u8) {
     });
 }
 
-/// Fill the slot's chunk with the next read block (per-slot file_chunk).
+/// Fill the slot's chunk with the next read block.
 fn ftp_read_chunk(_fs: &mut Filesystem<'_, LfsNor>, slot: u8) {
     let slot = (slot as usize).min(2);
     let (sent, size, open) = critical_section::with(|_cs| {
@@ -1242,8 +1240,7 @@ fn path_of(name: &[u8; 24]) -> Option<&littlefs2::path::Path> {
     littlefs2::path::Path::from_bytes_with_nul(&name[..len + 1]).ok()
 }
 
-/// Refresh FS_SNAP from the mounted filesystem (history_web_list_json +
-/// history_web_usage equivalents).
+/// Refresh FS_SNAP from the mounted filesystem.
 fn fs_snapshot(fs: &mut Filesystem<'_, LfsNor>) -> bool {
     let mut snap = FsSnap {
         entries: [[0; 24]; 16],
@@ -1272,7 +1269,7 @@ fn fs_snapshot(fs: &mut Filesystem<'_, LfsNor>) -> bool {
         Ok(())
     })
     .ok();
-    // sort entries newest-first (name order = time order, like the C list)
+    // sort entries newest-first (name order = time order)
     snap.entries[..snap.count].sort_unstable_by(|a, b| b[..20].cmp(&a[..20]));
     if let Ok(blocks) = fs.available_blocks() {
         snap.free = (blocks as u32) * 4096;
@@ -1287,10 +1284,9 @@ fn fs_snapshot(fs: &mut Filesystem<'_, LfsNor>) -> bool {
     true
 }
 
-/// Open a data_*.raw for chunked download (history_web_open): opens the
-/// file once; FileChunk reads continue sequentially from the handle.
+/// Open a data_*.raw for chunked download: opens once, FileChunk reads
+/// continue sequentially from the handle.
 fn file_open(fs: &mut Filesystem<'_, LfsNor>, name: &[u8; 24]) -> bool {
-    // close any stale handle first
     let stale = critical_section::with(|_cs| {
         DOWNLOAD_FILE.lock(|d| d.borrow_mut().0.take())
     });
@@ -1339,7 +1335,7 @@ fn file_open(fs: &mut Filesystem<'_, LfsNor>, name: &[u8; 24]) -> bool {
     }
 }
 
-/// Read the next 512 B block into FILE_DL.chunk (history_web_read).
+/// Read the next 512 B block into FILE_DL.chunk.
 fn file_chunk(_fs: &mut Filesystem<'_, LfsNor>) -> bool {
     let (sent, size, open) = critical_section::with(|_cs| {
         FILE_DL.lock(|f| {
@@ -1354,7 +1350,6 @@ fn file_chunk(_fs: &mut Filesystem<'_, LfsNor>) -> bool {
         critical_section::with(|_cs| {
             FILE_DL.lock(|f| f.borrow_mut().eof = true)
         });
-        // close the finished handle
         let f = critical_section::with(|_cs| {
             DOWNLOAD_FILE.lock(|d| d.borrow_mut().0.take())
         });
@@ -1399,7 +1394,7 @@ fn file_chunk(_fs: &mut Filesystem<'_, LfsNor>) -> bool {
             }
         })
     });
-    // finished: close the handle now
+    // finished: close so the alloc cell is free
     let done = critical_section::with(|_cs| {
         FILE_DL.lock(|f| {
             let g = f.borrow();

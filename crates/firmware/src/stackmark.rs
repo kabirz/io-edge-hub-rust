@@ -2,10 +2,9 @@
 //!
 //! The firmware has no heap and a single executor, so the free RAM above the
 //! statics ([_stack_end, _stack_start)) is one physical stack shared by every
-//! embassy task poll and every IRQ handler (Cortex-M exceptions run on MSP).
-//! There are no per-task stacks to report, but each task's polls reach a
-//! different depth: [probe] records the lowest MSP a task has ever observed
-//! at its loop entries (and in its deep helpers), which is that task's
+//! embassy task poll and every IRQ handler. There are no per-task stacks to
+//! report, but each task's polls reach a different depth: [probe] records
+//! the lowest MSP a task has ever observed, which is that task's
 //! contribution to the shared stack. The pattern-scan [usage] stays the
 //! authoritative whole-stack watermark — it also catches IRQ frames and
 //! C-FFI depth below any probe point.
@@ -144,11 +143,10 @@ pub fn ccm_usage() -> (u32, u32) {
 }
 
 /// Pattern-fill the not-yet-used stack below the current SP. Call once from
-/// main() before spawning tasks. IRQs may already be enabled: at this point no
-/// handler can have run, so nothing deeper than main's live frame exists and
-/// the fill boundary is safe. Frames already used above the SP (Reset_Handler,
-/// executor trampoline) stay untouched; the watermark therefore measures
-/// usage below main's boot frame, which is where all task/IRQ depth happens.
+/// main() before spawning tasks: at that point no handler has run yet, so
+/// the fill boundary below main's live frame is safe. Frames already used
+/// above the SP stay untouched; the watermark measures usage below main's
+/// boot frame, which is where all task/IRQ depth happens.
 pub fn init() {
     unsafe {
         let sp = cortex_m::register::msp::read() as usize & !3;

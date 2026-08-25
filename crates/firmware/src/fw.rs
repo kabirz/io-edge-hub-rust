@@ -1,12 +1,12 @@
-//! Firmware-upgrade session over the W25Q slot1, port of src/fw/fw_upg.c.
+//! Firmware-upgrade session over the W25Q slot1.
 //!
-//! Same return-code contract as the C code: start() gives 0 ok / -2 keyhash
-//! mismatch / -3 busy / -1 other. start() erases the whole slot (the trailer
-//! area at the slot tail must be clean or a later trailer write fails);
-//! writes are page-buffered; finish() flushes the tail, then verifies by
-//! reading slot1 back (CRC16 over the received image + TLV keyhash).
-//! NOR access goes through the storage task's driver mutex, so littlefs
-//! traffic and upgrade traffic serialize on the same SPI bus.
+//! start() gives 0 ok / -2 keyhash mismatch / -3 busy / -1 other. start()
+//! erases the whole slot (the trailer area at the slot tail must be clean or
+//! a later trailer write fails); writes are page-buffered; finish() flushes
+//! the tail, then verifies by reading slot1 back (CRC16 over the received
+//! image + TLV keyhash). NOR access goes through the storage task's driver
+//! mutex, so littlefs traffic and upgrade traffic serialize on the same SPI
+//! bus.
 
 use core::cell::RefCell;
 
@@ -212,8 +212,8 @@ pub fn finish(crc: Option<u16>) -> bool {
             return;
         }
         let tlv_ok = tlv_keyhash_ok();
-        // crc=None (CAN CONFIRM, fw_upg_finish_ex(0,false) parity): skip
-        // the CRC compare — the MCUboot signature is the integrity gate
+        // crc=None (CAN CONFIRM): skip the CRC compare — the MCUboot
+        // signature is the integrity gate
         let crc_bad = match crc {
             Some(expect) => crc_v != expect,
             None => false,
@@ -285,7 +285,7 @@ pub fn active() -> bool {
     FW.lock(|f| f.borrow().active)
 }
 
-// ==================== MCUboot trailer (boot_set_pending) ====================
+// ---- MCUboot trailer (boot_set_pending) ----
 
 /// bootutil boot_set_next(slot1, active=false, confirm=permanent) on a
 /// freshly erased trailer: magic, then image_ok + swap_info (PERM/TEST).

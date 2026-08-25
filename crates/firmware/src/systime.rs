@@ -1,4 +1,4 @@
-//! System time: RTC-backed epoch cache, ported from src/sys/time.c.
+//! System time: RTC-backed epoch cache.
 //!
 //! The epoch is read once at boot (RTC keeps time via VBAT), cached in an
 //! atomic, and incremented by a 1 Hz tick; `set_timestamp` writes both the RTC

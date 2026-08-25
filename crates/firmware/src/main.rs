@@ -31,7 +31,7 @@ use embassy_time::{Duration, Ticker};
 
 fn board_config() -> BoardConfig {
     let mut cfg = BoardConfig::default();
-    // HSE 13MHz /13 *336 /2 = 168MHz SYSCLK, APB1 42MHz, APB2 84MHz (same tree as the C firmware)
+    // HSE 13MHz /13 *336 /2 = 168MHz SYSCLK, APB1 42MHz, APB2 84MHz
     cfg.rcc = rcc::Config::new();
     cfg.rcc.hse = Some(Hse { freq: Hertz(13_000_000), mode: HseMode::Oscillator });
     cfg.rcc.pll_src = PllSource::HSE;
@@ -46,7 +46,7 @@ fn board_config() -> BoardConfig {
     cfg.rcc.ahb_pre = rcc::AHBPrescaler::DIV1;
     cfg.rcc.apb1_pre = rcc::APBPrescaler::DIV4;
     cfg.rcc.apb2_pre = rcc::APBPrescaler::DIV2;
-    // RTC on LSE (VBAT-backed, same as the C firmware)
+    // RTC on LSE (VBAT-backed)
     cfg.rcc.ls = rcc::LsConfig::default_lse();
     cfg
 }
@@ -204,7 +204,7 @@ async fn main(spawner: Spawner) {
             MB_TX2.init([0u8; 512]),
         )
         .expect("spawn mbtcp2"));
-    // 3rd listener accepts-then-aborts the excess master (tcp.c behavior)
+    // 3rd listener accepts-then-aborts the excess master
     static RJ_RX: static_cell::StaticCell<[u8; 64]> = static_cell::StaticCell::new();
     static RJ_TX: static_cell::StaticCell<[u8; 64]> = static_cell::StaticCell::new();
     spawner
@@ -398,7 +398,7 @@ async fn heartbeat(
         if ticks % 30 == 0 {
             wdt.pet();
         }
-        // netmon: 500ms link poll; link down -> DO all off (w5500.c net_mon)
+        // netmon: 500ms link poll; link down -> DO all off
         if ticks % 5 == 0 {
             let up = stack.is_link_up();
             critical_section::with(|_cs| crate::net::LINK_UP.lock(|b| *b.borrow_mut() = up));
@@ -411,7 +411,7 @@ async fn heartbeat(
                 io_gpio::set_do_led(0);
             }
         }
-        // heartbeat LED: 300ms on / 2700ms off (same as the C firmware)
+        // heartbeat LED: 300ms on / 2700ms off
         led.set_level(if ticks % 30 < 3 { Level::High } else { Level::Low });
     }
 }

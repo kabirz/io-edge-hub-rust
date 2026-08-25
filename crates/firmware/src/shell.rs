@@ -1,5 +1,4 @@
-//! Debug shell on USART1 (shares the console with the logger), 1:1 port of
-//! src/sys/shell.c.
+//! Debug shell on USART1 (shares the console with the logger).
 //!
 //! RX: DMA2 circular ring (uart_raw) polled by this task — hardware drains
 //! the DR during the millisecond PRIMASK freezes of NOR flash ops, so UART
@@ -62,7 +61,7 @@ fn redraw(line: &[u8], n: usize, pos: usize) {
     log::raw(&buf[..m]);
 }
 
-// ==================== history ====================
+// ---- history ----
 
 struct Hist {
     lines: [[u8; LINE_MAX]; HIST_MAX], // NUL-terminated
@@ -102,7 +101,7 @@ impl Hist {
     }
 }
 
-// ==================== Tab completion (command tree) ====================
+// ---- Tab completion (command tree) ----
 
 struct Cmd {
     name: &'static str,
@@ -241,7 +240,7 @@ fn complete(line: &mut [u8; LINE_MAX], n: &mut usize) {
     log::raw(&line[..*n]);
 }
 
-// ==================== commands ====================
+// ---- commands ----
 
 fn regs_snapshot() -> (heapless::Vec<u16, 64>, heapless::Vec<u16, 16>) {
     critical_section::with(|_cs| {
@@ -860,7 +859,7 @@ fn io_dispatch(args: &[&str]) {
 
 fn dispatch(line: &[u8], n: usize) {
     crate::stackmark::probe(crate::stackmark::slot::SH);
-    // split on blanks (in-place like sh_split)
+    // split on blanks (in-place)
     let mut argv: [&str; ARG_MAX] = [""; ARG_MAX];
     let mut argc = 0usize;
     let mut i = 0usize;
@@ -934,7 +933,7 @@ fn parse_ip(s: &str) -> Option<[u8; 4]> {
     Some(ip)
 }
 
-// ==================== task: line editor ====================
+// ---- task: line editor ----
 
 /// Line editor over the DMA RX ring (uart_raw::init ran from main before
 /// any logging; RX needs no interrupt enable at all).

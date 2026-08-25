@@ -1,4 +1,4 @@
-//! Delayed reboot, ported from src/sys/reboot.c / io_reboot_cold semantics.
+//! Delayed reboot.
 //!
 //! The pending deadline is polled by the heartbeat task; when due it does the
 //! cold reset. Cold path = short delay (100ms) so the UDP reply can leave the
@@ -17,12 +17,12 @@ pub fn schedule_delayed_ms(ms: u32) {
     DEADLINE_MS.store(now_ms().wrapping_add(ms), Ordering::Relaxed);
 }
 
-/// io_reboot_cold(): reboot after ~100ms (reply must be on the wire already).
+/// Reboot after ~100ms (the triggering reply must be on the wire already).
 pub fn cold() {
     schedule_delayed_ms(100);
 }
 
-/// Web/shell graceful reboot (~3s like the C heartbeat path).
+/// Web/shell graceful reboot (~3s).
 pub fn graceful() {
     schedule_delayed_ms(3000);
 }
