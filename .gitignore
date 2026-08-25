@@ -1,7 +1,6 @@
 /target
 /build
-/keys
-*.pem
+tools/host-tool/out/
 *.log
 tmp_*
 __pycache__/
