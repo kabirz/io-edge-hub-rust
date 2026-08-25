@@ -106,11 +106,12 @@ async fn main(spawner: Spawner) {
     uart_raw::init();
     spawner.spawn(shell::shell_task().expect("spawn sh"));
     use core::fmt::Write as _;
-    let mut banner = heapless::String::<64>::new();
+    let mut banner = heapless::String::<96>::new();
     banner
         .write_fmt(format_args!(
-            "io-edge-hub rust {} boot",
-            appstate::version::FW_VERSION
+            "io-edge-hub rust {} boot ({})",
+            appstate::version::FW_VERSION,
+            appstate::version::FW_BUILD,
         ))
         .ok();
     log::inf(&banner);
