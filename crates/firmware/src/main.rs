@@ -58,14 +58,13 @@ fn board_config() -> BoardConfig {
 
 #[embassy_executor::main]
 async fn main(spawner: Spawner) {
-    // boot_jump_vec() leaves PRIMASK set (__disable_irq before the jump) and
-    // cortex-m-rt never clears it. Before unmasking we must also kill any
-    // interrupts the bootloader left pending/enabled: its jump only clears
-    // NVIC ICPR[0], so a pending IRQ whose vector our table binds to
-    // DefaultHandler (e.g. EXTI9_5 from DI pin activity) would trap the core
-    // in the default handler loop the moment interrupts open.
+    // The bootloader leaves PRIMASK set (__disable_irq before the jump) and
+    // cortex-m-rt never clears it. Before unmasking, kill any interrupts it
+    // left pending/enabled so a pending IRQ whose vector our table binds to
+    // DefaultHandler (e.g. EXTI9_5 from DI pin activity) cannot trap the
+    // core in the default handler loop the moment interrupts open.
     unsafe {
-        core::ptr::write_volatile(0xE000_ED08 as *mut u32, 0x0801_0200); // SCB.VTOR
+        core::ptr::write_volatile(0xE000_ED08 as *mut u32, 0x0802_0000); // SCB.VTOR
         for i in 0..3usize {
             core::ptr::write_volatile((0xE000_E180 + 4 * i) as *mut u32, 0xFFFF_FFFF); // ICER: disable all
             core::ptr::write_volatile((0xE000_E280 + 4 * i) as *mut u32, 0xFFFF_FFFF);
@@ -373,6 +372,11 @@ async fn main(spawner: Spawner) {
         .expect("spawn ai"),
     );
     log::inf("io: DI16/AI4 sampling, rtu up");
+
+    // embassy-boot trial-boot confirm: reaching here means storage mounted,
+    // network up and every task spawned, so the freshly swapped-in image is
+    // healthy and the next reset must not revert to the previous one.
+    fw::boot_confirm();
     stackmark::probe("embassy-main");
 }
 

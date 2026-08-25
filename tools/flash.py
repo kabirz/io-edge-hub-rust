@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Flash build/full.bin (bootloader + signed app) via cargo-flash.
+"""Flash build/full.bin (embassy-boot bootloader + app) via cargo-flash.
 
     python tools/flash.py            # flash the existing build/full.bin
     python tools/flash.py --build    # cargo build --release + tools/sign.py first
@@ -10,9 +10,10 @@ Executes:
     cargo flash --chip STM32F407VETx --path build/full.bin \
         --binary-format bin --base-address 0x8000000
 
-full.bin = boot(64K) + signed app (slot0), so this rewrites the WHOLE
-internal flash including the MCUboot bootloader (manufacturing image). For
-an app-only update flash build/app.signed.bin at 0x08010000 instead.
+full.bin = boot(0x08000000..0x08020000, 0xFF-padded) + raw app (active
+partition @0x08020000), so this rewrites the WHOLE internal flash
+(manufacturing image). For an app-only update flash build/app.bin at
+0x08020000 instead.
 
 Requires cargo-flash (cargo install cargo-flash) and the ST-Link attached
 to the machine running this script — on the bench that is the Linux box,

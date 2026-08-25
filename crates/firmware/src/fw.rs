@@ -1,25 +1,27 @@
-//! Firmware-upgrade session over the W25Q slot1.
+//! Firmware-upgrade session over the W25Q DFU partition (embassy-boot).
 //!
-//! start() gives 0 ok / -2 keyhash mismatch / -3 busy / -1 other. start()
-//! erases the whole slot (the trailer area at the slot tail must be clean or
-//! a later trailer write fails); writes are page-buffered; finish() flushes
-//! the tail, then verifies by reading slot1 back (CRC16 over the received
-//! image + TLV keyhash). NOR access goes through the storage task's driver
-//! mutex, so littlefs traffic and upgrade traffic serialize on the same SPI
-//! bus.
+//! Payload on every channel = raw app binary + 64-byte ed25519 signature of
+//! SHA-512(binary) (the scheme embassy-boot/salty verify). start() gives
+//! 0 ok / -2 keyhash mismatch / -3 busy / -1 other; it erases the whole DFU
+//! partition. Writes are page-buffered. finish() flushes, CRC-checks the
+//! readback and verifies the ed25519 signature (salty). boot_set_pending()
+//! writes the embassy-boot SWAP magic into the state partition — the
+//! bootloader swaps DFU with the active partition on the next reset, and
+//! reverts automatically unless the new image reaches boot_confirm() (end
+//! of main). NOR access goes through the storage task's driver mutex, so
+//! littlefs traffic and upgrade traffic serialize on the same SPI bus.
 
 use core::cell::RefCell;
 
 use embassy_sync::blocking_mutex::raw::ThreadModeRawMutex;
 use embassy_sync::blocking_mutex::Mutex;
 use io_edge_hub_proto::fw_upg as upg;
+use salty::{PublicKey, Sha512, Signature};
 
 use crate::storage::nor_with;
 
 const PAGE_SZ: usize = 256;
-const READ_CHUNK: usize = 64;
-const IMG_HDR_SIZE: u32 = 0x200;
-const TLV_READ: usize = 512;
+const READ_CHUNK: usize = 256;
 
 struct FwSession {
     active: bool,
@@ -31,7 +33,7 @@ struct FwSession {
 }
 
 // ThreadModeRawMutex, NOT a critical section (same reasoning as storage::NOR):
-// write()/start()/finish() run NOR page programs (0.4-3 ms), a whole-slot
+// write()/start()/finish() run NOR page programs (0.4-3 ms), a whole-partition
 // erase (~2 s) and a full-image readback inside the lock — masking interrupts
 // that long overruns the 3-deep bxCAN RX FIFO at full bus speed and drops
 // ~3 frames per 256 B page. Sound because every caller is an embassy task in
@@ -46,8 +48,8 @@ static FW: Mutex<ThreadModeRawMutex, RefCell<FwSession>> = Mutex::new(RefCell::n
     page_len: 0,
 }));
 
-/// Last finish() diagnostics (UDP debug cmd 0xFB): written/computed crc/
-/// expected crc/tlv ok + first and last 16 readback bytes.
+/// Last finish() diagnostics (UDP debug cmd 0xFB): stage code, written/
+/// computed crc/expected crc/sig-verified + first and last 16 readback bytes.
 pub static FW_DBG: Mutex<ThreadModeRawMutex, RefCell<[u32; 16]>> =
     Mutex::new(RefCell::new([0; 16]));
 
@@ -69,9 +71,8 @@ fn page_flush(s: &mut FwSession) -> bool {
     true
 }
 
-/// Whole-slot erase; caller checks active/keyhash/size first.
-fn erase_slot1() -> bool {
-    matches!(nor_with(|nor| nor.erase(0, upg::SLOT1_SIZE)), Some(Ok(())))
+fn erase_dfu() -> bool {
+    matches!(nor_with(|nor| nor.erase(0, upg::DFU_SIZE)), Some(Ok(())))
 }
 
 pub fn start(total: u32, keyhash: Option<&[u8; upg::FW_KEYHASH_LEN]>) -> i32 {
@@ -82,7 +83,7 @@ pub fn start(total: u32, keyhash: Option<&[u8; upg::FW_KEYHASH_LEN]>) -> i32 {
             rc = -3;
             return;
         }
-        if total < 64 || total > upg::SLOT1_SIZE {
+        if !upg::payload_ok(total) {
             rc = -1;
             return;
         }
@@ -92,7 +93,7 @@ pub fn start(total: u32, keyhash: Option<&[u8; upg::FW_KEYHASH_LEN]>) -> i32 {
                 return;
             }
         }
-        if !erase_slot1() {
+        if !erase_dfu() {
             rc = -1;
             return;
         }
@@ -144,7 +145,7 @@ pub fn abort() {
     });
 }
 
-/// Flush + verify (readback CRC when `crc` is Some) + TLV keyhash check.
+/// Flush + CRC readback (when `crc` is Some) + ed25519 signature verify.
 /// Resets the session; `received()`/`total()` read 0 afterwards.
 pub fn finish(crc: Option<u16>) -> bool {
     let mut ok = false;
@@ -189,7 +190,7 @@ pub fn finish(crc: Option<u16>) -> bool {
         let mut verified = true;
         let mut off = 0u32;
         while off < total {
-            let n = (total - off).min(READ_CHUNK as u32) as usize;
+            let n = upg::clamp_chunk(total - off, READ_CHUNK);
             let got = matches!(nor_with(|nor| nor.read(off, &mut buf[..n])), Some(Ok(())));
             if !got {
                 verified = false;
@@ -211,14 +212,13 @@ pub fn finish(crc: Option<u16>) -> bool {
             dbg_store(&[4, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]);
             return;
         }
-        let tlv_ok = tlv_keyhash_ok();
-        // crc=None (CAN CONFIRM): skip the CRC compare — the MCUboot
-        // signature is the integrity gate
+        // crc=None (CAN CONFIRM): skip the CRC compare — the ed25519
+        // signature below is the integrity gate
         let crc_bad = match crc {
             Some(expect) => crc_v != expect,
             None => false,
         };
-        if crc_bad || !tlv_ok {
+        if crc_bad {
             // full diagnostics: computed/expected crc + tail bytes
             let mut tail16 = [0u8; 16];
             let tail_off = total.saturating_sub(16);
@@ -227,40 +227,134 @@ pub fn finish(crc: Option<u16>) -> bool {
             d[0] = 5;
             d[1] = crc_v as u32;
             d[2] = crc.unwrap_or(0) as u32;
-            d[3] = tlv_ok as u32;
             for (i, w) in tail16.chunks(4).enumerate() {
                 d[8 + i] = u32::from_le_bytes([w[0], w[1], w[2], w[3]]);
             }
             dbg_store(&d);
             return;
         }
+
+        let sig_ok = verify_staged(total - upg::SIG_LEN as u32);
+        if !sig_ok {
+            dbg_store(&[6, total, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]);
+            return;
+        }
+        dbg_store(&[
+            7,
+            total,
+            crc_v as u32,
+            crc.unwrap_or(0) as u32,
+            1,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+        ]);
         ok = true;
     });
     ok
 }
 
-/// Read the image header from slot1, locate the TLV block, check its KEYHASH.
-fn tlv_keyhash_ok() -> bool {
-    let mut hdr = [0u8; 32];
-    if !matches!(nor_with(|nor| nor.read(0, &mut hdr)), Some(Ok(()))) {
+/// ed25519-verify the staged payload: the last SIG_LEN bytes are the
+/// signature (made by the host over SHA-512 of the image), everything
+/// before is the image. Both are read straight off the NOR so the check
+/// covers the programmed bytes, not the transfer buffers.
+fn verify_staged(image_len: u32) -> bool {
+    let mut sig = [0u8; upg::SIG_LEN];
+    if !matches!(nor_with(|nor| nor.read(image_len, &mut sig)), Some(Ok(()))) {
         return false;
     }
-    let pos = match upg::image_tlv_pos(&hdr, IMG_HDR_SIZE) {
-        Some(p) => p,
-        None => return false,
+    let mut h = Sha512::new();
+    let mut buf = [0u8; READ_CHUNK];
+    let mut off = 0u32;
+    while off < image_len {
+        let n = upg::clamp_chunk(image_len - off, READ_CHUNK);
+        let got = matches!(nor_with(|nor| nor.read(off, &mut buf[..n])), Some(Ok(())));
+        if !got {
+            return false;
+        }
+        h.update(&buf[..n]);
+        off += n as u32;
+    }
+    let digest = h.finalize();
+
+    let Ok(pk) = PublicKey::try_from(&upg::FW_PUBKEY) else {
+        return false;
     };
-    if pos.tlv_off + 4 > upg::SLOT1_SIZE {
-        return false;
+    let s = Signature::from(&sig);
+    pk.verify(&digest, &s).is_ok()
+}
+
+// ---- embassy-boot state partition ----
+
+fn state_magic() -> Option<u8> {
+    let mut b = [0u8; 1];
+    match nor_with(|nor| nor.read(upg::STATE_OFF, &mut b)) {
+        Some(Ok(())) => Some(b[0]),
+        _ => None,
     }
-    let mut tlv = [0u8; TLV_READ];
-    let read = (TLV_READ as u32).min(upg::SLOT1_SIZE - pos.tlv_off) as usize;
+}
+
+/// Byte-accurate port of embassy-boot BlockingFirmwareState::set_magic:
+/// idempotent when the magic is already set; otherwise invalidate the
+/// progress marker (byte 1) BEFORE the sector erase so a power cut between
+/// the steps reads as "progress invalid" instead of resuming a stale swap.
+fn state_set_magic(magic: u8) -> bool {
+    if state_magic() == Some(magic) {
+        return true;
+    }
+    let valid = nor_with(|nor| {
+        let mut b = [0u8; 1];
+        nor.read(upg::STATE_OFF + 1, &mut b).map(|_| b[0])
+    });
+    if matches!(valid, Some(Ok(0xFF))) {
+        let b = [0x00u8; 1];
+        if !matches!(
+            nor_with(|nor| nor.write(upg::STATE_OFF + 1, &b)),
+            Some(Ok(()))
+        ) {
+            return false;
+        }
+    }
     if !matches!(
-        nor_with(|nor| nor.read(pos.tlv_off, &mut tlv[..read])),
+        nor_with(|nor| nor.erase(upg::STATE_OFF, upg::STATE_SIZE)),
         Some(Ok(()))
     ) {
         return false;
     }
-    matches!(upg::keyhash_in_tlv(&tlv[..read]), Some(kh) if kh == &upg::FW_KEYHASH)
+    let b = [magic];
+    matches!(nor_with(|nor| nor.write(upg::STATE_OFF, &b)), Some(Ok(())))
+}
+
+/// Trigger the swap on the next reset. `permanent` is kept for channel
+/// compatibility; with embassy-boot every swap is a trial boot — the new
+/// image must run to the end of main (boot_confirm) or the next reset
+/// reverts to the previous image.
+pub fn boot_set_pending(_permanent: bool) -> bool {
+    state_set_magic(upg::STATE_MAGIC_SWAP)
+}
+
+/// Confirm a freshly swapped-in image so the next reset does not revert.
+/// Called at the end of main: reaching it means the box mounted its
+/// storage, brought the network up and spawned every task.
+pub fn boot_confirm() {
+    match state_magic() {
+        Some(upg::STATE_MAGIC_BOOT) | None => {}
+        Some(_) => {
+            if state_set_magic(upg::STATE_MAGIC_BOOT) {
+                crate::log::inf("fw: boot confirmed");
+            } else {
+                crate::log::err("fw: boot confirm FAILED (will revert)");
+            }
+        }
+    }
 }
 
 pub fn received() -> u32 {
@@ -283,32 +377,4 @@ pub fn total() -> u32 {
 
 pub fn active() -> bool {
     FW.lock(|f| f.borrow().active)
-}
-
-// ---- MCUboot trailer (boot_set_pending) ----
-
-/// bootutil boot_set_next(slot1, active=false, confirm=permanent) on a
-/// freshly erased trailer: magic, then image_ok + swap_info (PERM/TEST).
-/// Offsets/flags are the bootutil_priv/bootutil_misc formulas for
-/// BOOT_MAX_ALIGN == 8; run after finish() so the region is still erased.
-pub fn boot_set_pending(permanent: bool) -> bool {
-    let ok = nor_with(|nor| {
-        nor.write(upg::magic_off(), &upg::BOOT_MAGIC)
-            .and_then(|_| {
-                if permanent {
-                    nor.write(upg::image_ok_off(), &upg::trailer_flag(upg::BOOT_FLAG_SET))
-                } else {
-                    Ok(())
-                }
-            })
-            .and_then(|_| {
-                let ty = if permanent {
-                    upg::BOOT_SWAP_TYPE_PERM
-                } else {
-                    upg::BOOT_SWAP_TYPE_TEST
-                };
-                nor.write(upg::swap_info_off(), &upg::trailer_flag(ty))
-            })
-    });
-    matches!(ok, Some(Ok(())))
 }

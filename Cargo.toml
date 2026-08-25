@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["crates/proto", "crates/firmware", "crates/littlefs2-sys"]
+members = ["crates/proto", "crates/firmware", "crates/littlefs2-sys", "crates/bootloader"]
 exclude = ["build/lfstest"]
 
 [patch.crates-io]
@@ -16,3 +16,4 @@ opt-level = "s"
 lto = "fat"
 codegen-units = 1
 debug = 1
+
