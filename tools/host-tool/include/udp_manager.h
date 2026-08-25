@@ -54,6 +54,9 @@ bool UdpManager_SetModbus(UdpManager *m, const char *ip, uint8_t slave_id,
 bool UdpManager_GetModbus(UdpManager *m, const char *ip, uint8_t *out_slave,
                           uint16_t *out_baud);                                           /* 0x13 */
 bool UdpManager_SetTime(UdpManager *m, const char *ip, uint32_t unix_ts, uint8_t *out_ok); /* 0x14 */
+/* GET_KEYHASH (0x15): 回 [0x15][keyhash 32B]。升级前问设备要它校验用的
+ * 公钥指纹 —— 换签名钥匙只改固件, 本工具无需跟改。 */
+bool UdpManager_GetKeyhash(UdpManager *m, const char *ip, uint8_t out_keyhash[32]);        /* 0x15 */
 /* GET_IP (0x11, broadcast-allowed): 向所有本机网卡子网定向广播发送, 单播+8601 监听回复.
  * out 一次性填所有回复: "a.b.c.d" 一行一条, '\n' 分隔.
  * out_cap 为 out 缓冲字节. 返回 true=至少发现 1 台. */

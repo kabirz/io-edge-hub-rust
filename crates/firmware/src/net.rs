@@ -221,6 +221,9 @@ async fn udp_task(stack: Stack<'static>) {
         minor: version::FW_MINOR,
         patch: version::FW_PATCH,
         git: version::FW_GIT,
+        // GET_KEYHASH (0x15): upgrade hosts read the fingerprint over this
+        // same channel instead of hardcoding it
+        keyhash: &io_edge_hub_proto::fw_upg::FW_KEYHASH,
     };
 
     let mut rx = [0u8; 1500];

@@ -686,19 +686,24 @@ function pickFile(f){
 function setMsg(m,c){const e=$("#upMsg");e.textContent=m;e.className="msg "+(c||"")}
 
 /* 升级载荷: 裸镜像 + 尾部 64B ed25519 签名 (tools/sign.py 产出的 app.dfu.bin).
- * keyhash 不在文件内 —— 是编译期常量 SHA-256(公钥), 与固件
- * proto::fw_upg::FW_KEYHASH、tools/host-tool fw_image.c 同源, 换钥匙同步改. */
+ * keyhash 是设备公钥的 SHA-256 指纹 —— 由设备通过 /api/info 自报,
+ * 换签名钥匙只改固件一处, 本页面无需同步. */
 const IMG_SIG_LEN=64;
 const IMG_MAX_SIZE=512*1024;
 const IMG_MCUBOOT_MAGIC=0x96F3B83D;
-const FW_KEYHASH_HEX="7cb9c1c5524df6bda973b751dad4201d2d5d8908668eafdf4419239969c6851f";
 
-function keyhashBytes(){
-	const out=new Uint8Array(32);
-	for(let i=0;i<32;i++){
-		out[i]=parseInt(FW_KEYHASH_HEX.substr(i*2,2),16);
+/* 从 /api/info 读设备 keyhash (hex 64 -> 32B); 旧固件无该字段时返回 null
+ * (fw_start 不带 keyhash, 设备跳过预检, ed25519 验签仍是最终门槛) */
+async function fetchKeyhash(){
+	const d=await api("/api/info");
+	if(typeof d.keyhash==="string"&&d.keyhash.length===64){
+		const out=new Uint8Array(32);
+		for(let i=0;i<32;i++){
+			out[i]=parseInt(d.keyhash.substr(i*2,2),16);
+		}
+		return out;
 	}
-	return out;
+	return null;
 }
 
 /* 校验载荷: 长度能容纳尾部签名且不超过设备 DFU 分区; 识别旧 MCUboot 镜像 */
@@ -713,7 +718,7 @@ async function parseFirmwareImage(file){
 		throw new Error("载荷长度非法 ("+buf.byteLength+"B, 应为 app.dfu.bin: 64B < 大小 ≤ 512K)");
 	}
 
-	return{data:new Uint8Array(buf),size:buf.byteLength,keyhash:keyhashBytes()};
+	return{data:new Uint8Array(buf),size:buf.byteLength};
 }
 
 /* Base64 编码 */
@@ -733,14 +738,19 @@ async function doUpgrade(){
 	const prog=$("#upProg");prog.style.display="block";
 
 	try{
-		/* 校验载荷并取常量 keyhash (SHA-256 of ed25519 公钥) */
+		/* 校验载荷; keyhash 由设备 /api/info 自报 (换钥匙只改固件) */
 		setMsg("校验载荷格式…");
 		const img=await parseFirmwareImage(upFileBuf);
+		const keyhash=await fetchKeyhash();
 
-		/* 将 keyhash 编码为 Base64, 随 fw_start 一起发送到设备端验证 */
-		const keyhashB64=toBase64(img.keyhash);
+		/* 将 keyhash 编码为 Base64, 随 fw_start 一起发送到设备端验证;
+		 * 旧固件无 keyhash 字段时不带 (设备跳过预检, 验签兜底) */
+		const req={cmd:"fw_start",size:img.size};
+		if(keyhash){
+			req.keyhash=toBase64(keyhash);
+		}
 		setMsg("擦除中…");
-		const r=await wsSend({cmd:"fw_start",size:img.size,keyhash:keyhashB64});
+		const r=await wsSend(req);
 		if(!r.ok){
 			if(r.err==="keyhash mismatch"){
 				throw new Error("设备拒绝: 签名密钥不匹配 (载荷与设备固件密钥不一致)");

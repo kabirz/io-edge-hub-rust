@@ -29,8 +29,14 @@ bool fw_image_validate_header(const uint8_t *data, size_t len);
  * 用于给出精确的错误提示而不是笼统的 "非固件镜像"。 */
 bool fw_image_is_mcuboot(const uint8_t *data, size_t len);
 
-/* 32B keyhash 常量 (SHA-256 of ed25519 public key), 直接发给设备 START。
- * 生命周期内不变, 与固件同步更新。 */
+/* 32B keyhash 常量 (SHA-256 of ed25519 public key), 兜底值 —— 正常路径
+ * 优先动态获取: UDP 通道用 UdpManager_GetKeyhash (0x15, 设备自报),
+ * CAN 通道用 fw_image_keyhash_load_file (exe 旁公钥文件)。换钥匙后
+ * 常量可能过期, 但过渡固件 (旧钥签名) 仍可用它完成轮换。 */
 const uint8_t *fw_image_keyhash(void);
+
+/* 读 exe 同目录下 32B 的 ed25519.keyhash (tools/gen_ed25519.py 产出的
+ * keyhash 原始文件拷出来)。CAN 通道的动态途径 (设备无 IP, 不能走 UDP)。 */
+bool fw_image_keyhash_load_file(uint8_t out_keyhash[32]);
 
 #endif /* FW_IMAGE_H */

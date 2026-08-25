@@ -447,6 +447,19 @@ bool UdpManager_SetTime(UdpManager *m, const char *ip, uint32_t unix_ts, uint8_t
 	return true;
 }
 
+/* GET_KEYHASH (0x15): 发 [0x15], 回 [0x15][keyhash 32B]。
+ * 设备自报它 START 校验用的公钥指纹 —— 与升级同一通道, 换钥匙零同步。 */
+bool UdpManager_GetKeyhash(UdpManager *m, const char *ip, uint8_t out_keyhash[32])
+{
+	uint8_t req[1] = { 0x15 };
+	uint8_t resp[64];
+	int rn = 0;
+	if (!send_recv(m, ip, 0x15, req, 1, resp, &rn, IOEDGE_UDP_TIMEOUT_MS)) return false;
+	if (rn < 33) { sprintf(m->last_error, "GET_KEYHASH 回复过短"); return false; }
+	if (out_keyhash) memcpy(out_keyhash, resp + 1, 32);
+	return true;
+}
+
 bool UdpManager_FactoryReset(UdpManager *m, const char *ip, uint8_t *out_ok)
 {
 	uint8_t req[1] = { 0x19 };

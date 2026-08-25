@@ -1,8 +1,11 @@
 #!/usr/bin/env python3
 """Generate the firmware-update ed25519 signing keypair (if missing).
 
-Creates keys/ed25519.key (seed hex, private - gitignored, never commit) and
-keys/ed25519.pub (raw 32-byte public key, safe to publish). Prints:
+Creates keys/ed25519.key (seed hex, private - gitignored, never commit),
+keys/ed25519.pub (raw 32-byte public key, safe to publish) and
+keys/ed25519.keyhash (32-byte sha256(pubkey) — copy next to the host-tool
+exe for CAN upgrades; UDP/web hosts fetch the keyhash from the device).
+Prints:
 
   PUBKEY_HEX   - raw public key, baked into proto::fw_upg::FW_PUBKEY
   KEYHASH_HEX  - sha256(public key), baked into proto::fw_upg::FW_KEYHASH
@@ -17,6 +20,7 @@ from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 KEY = os.path.join(ROOT, "keys", "ed25519.key")
 PUB = os.path.join(ROOT, "keys", "ed25519.pub")
+KEYHASH = os.path.join(ROOT, "keys", "ed25519.keyhash")
 
 
 def main():
@@ -36,8 +40,12 @@ def main():
         serialization.Encoding.Raw, serialization.PublicFormat.Raw)
     with open(PUB, "wb") as f:
         f.write(pub)
+    keyhash = hashlib.sha256(pub).digest()
+    with open(KEYHASH, "wb") as f:
+        f.write(keyhash)
     print("PUBKEY_HEX  ", pub.hex())
-    print("KEYHASH_HEX ", hashlib.sha256(pub).hexdigest())
+    print("KEYHASH_HEX ", keyhash.hex())
+    print(f"keyhash file: {KEYHASH} (copy next to the host-tool exe for CAN)")
 
 
 if __name__ == "__main__":

@@ -518,8 +518,18 @@ static DWORD WINAPI udp_upgrade_thread(LPVOID arg)
 	uint8_t status = 0;
 	uint16_t v2_chunk = 0;
 	uint32_t sz = g_upg.img_size;
-	const uint8_t *kh = g_upg.has_keyhash ? g_upg.keyhash : NULL;
 	const char *ip = g_upg.cur_ip;
+
+	/* keyhash 优先设备自报 (UDP 0x15, 与升级同通道, 换钥匙零同步);
+	 * 失败退回内置常量 (过渡固件轮换场景仍可用) */
+	uint8_t kh_buf[32];
+	const uint8_t *kh = fw_image_keyhash();
+	if (UdpManager_GetKeyhash(g_upg.udp, ip, kh_buf)) {
+		kh = kh_buf;
+		post_log(L"keyhash: 设备自报 (UDP 0x15)");
+	} else {
+		post_log(L"keyhash: 内置常量 (设备未应答 0x15)");
+	}
 
 	if (!UdpManager_FwStart(g_upg.udp, ip, sz, kh, &status, &v2_chunk)) {
 		post_log(L"FW_START 无响应 (设备未开机或 IP 错误)");
@@ -618,7 +628,16 @@ static DWORD WINAPI can_upgrade_thread(LPVOID arg)
 	(void)arg;
 	post_log(L"CAN 升级开始");
 
-	const uint8_t *kh = g_upg.has_keyhash ? g_upg.keyhash : NULL;
+	/* CAN 通道无 IP, 不能走 UDP 0x15: keyhash 优先 exe 旁 ed25519.keyhash
+	 * 文件 (tools/gen_ed25519.py 产物, 换钥匙时拷贝过来), 退回内置常量 */
+	uint8_t kh_buf[32];
+	const uint8_t *kh = fw_image_keyhash();
+	if (fw_image_keyhash_load_file(kh_buf)) {
+		kh = kh_buf;
+		post_log(L"keyhash: ed25519.keyhash (exe 同目录)");
+	} else {
+		post_log(L"keyhash: 内置常量 (exe 旁无 ed25519.keyhash)");
+	}
 	bool permanent = g_upg.cur_permanent; /* true=永久 */
 
 	/* MCUboot 紧急救援模式: 尽力发重启命令, 若设备死机则等待用户手动断电重启,

@@ -6,13 +6,18 @@
 Runs the full cycle against the device: START(size+keyhash) -> DATA_V2
 go-back-N windows -> END(crc16 + ed25519 verified on device) -> REBOOT,
 then polls GET_VERSION until the box finished the embassy-boot swap and is
-back online. Keyhash is SHA-256 of the ed25519 public key baked into the
-firmware (proto::fw_upg::FW_PUBKEY).
+back online.
+
+The keyhash is fetched from the device itself over this same UDP channel
+(cmd 0x15 GET_KEYHASH: SHA-256 of the ed25519 public key baked into the
+firmware), so rotating the signing key only touches the firmware. Offline
+fallback: keys/ed25519.pub next to the repo, hashed on the fly.
 
 Requires only Python 3 (no third-party packages). Run it from a host on
 the device's /24 — the upgrade commands are dropped cross-subnet.
 """
 import hashlib
+import os
 import socket
 import struct
 import sys
@@ -23,9 +28,24 @@ V2_ACK_TMO = 1.0
 V2_MAX_RETRIES = 8
 PORT = 8600
 
-PUB = bytes.fromhex(
-    "3aaf77593b2000db3029cb29accb707fa2fd408695279e46ecb18fd4500d7ec1")
-KEYHASH = hashlib.sha256(PUB).digest()
+ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+
+
+def resolve_keyhash(ip, sock):
+    """keyhash the DEVICE checks — ask it via UDP 0x15 (same channel the
+    upgrade runs on); fall back to hashing the repo public key."""
+    try:
+        sock.settimeout(2.0)
+        sock.sendto(b"\x15", (ip, PORT))
+        r, _ = sock.recvfrom(64)
+        if len(r) >= 33 and r[0] == 0x15:
+            return bytes(r[1:33]), "device UDP 0x15"
+    except OSError:
+        pass
+    pub = os.path.join(ROOT, "keys", "ed25519.pub")
+    if os.path.isfile(pub):
+        return hashlib.sha256(open(pub, "rb").read()).digest(), "keys/ed25519.pub"
+    raise SystemExit("cannot resolve keyhash: device not answering 0x15 and keys/ed25519.pub missing")
 
 
 def crc16_ccitt(data):
@@ -42,10 +62,12 @@ def main():
     ip = sys.argv[1] if len(sys.argv) > 1 else "192.168.12.101"
     path = sys.argv[2] if len(sys.argv) > 2 else "build/app.dfu.bin"
     img = open(path, "rb").read()
-    print(f"image: {path} ({len(img)} B incl 64B sig), keyhash {KEYHASH.hex()[:16]}...")
 
     s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     dst = (ip, PORT)
+
+    keyhash, src = resolve_keyhash(ip, s)
+    print(f"image: {path} ({len(img)} B incl 64B sig), keyhash {keyhash.hex()[:16]}... ({src})")
 
     def xfer(payload, tmo):
         s.settimeout(tmo)
@@ -53,7 +75,7 @@ def main():
         return s.recvfrom(2048)[0]
 
     t0 = time.time()
-    r = xfer(bytes([0x01]) + struct.pack("<I", len(img)) + KEYHASH, 30.0)
+    r = xfer(bytes([0x01]) + struct.pack("<I", len(img)) + keyhash, 30.0)
     status, chunk = r[1], struct.unpack("<H", r[2:4])[0]
     assert status == 1, f"START rejected status={status} (1=ok 2=keyhash 0=other)"
     print(f"START ok, v2 chunk={chunk} B (DFU erase done)")

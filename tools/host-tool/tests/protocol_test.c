@@ -68,11 +68,21 @@ int main(int argc, char **argv)
     }
     printf("GET_VERSION: %s\n", ver);
 
-    /* START (keyhash 常量) */
+    /* keyhash 设备自报 (UDP 0x15), 失败退回内置常量 */
+    uint8_t kh[32];
+    const uint8_t *keyhash = fw_image_keyhash();
+    if (UdpManager_GetKeyhash(m, ip, kh)) {
+        keyhash = kh;
+        printf("GET_KEYHASH: %02x%02x%02x%02x... (device)\n", kh[0], kh[1], kh[2], kh[3]);
+    } else {
+        printf("GET_KEYHASH: no reply, baked constant (%s)\n", UdpManager_GetLastError(m));
+    }
+
+    /* START (设备自报 keyhash) */
     DWORD t0 = GetTickCount();
     uint8_t status = 0;
     uint16_t chunk = 0;
-    if (!UdpManager_FwStart(m, ip, (uint32_t)sz, fw_image_keyhash(), &status, &chunk)) {
+    if (!UdpManager_FwStart(m, ip, (uint32_t)sz, keyhash, &status, &chunk)) {
         printf("FW_START no reply: %s\n", UdpManager_GetLastError(m));
         return 1;
     }

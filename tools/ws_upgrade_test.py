@@ -5,10 +5,10 @@
 
 Simulates exactly what the web page's 升级 button does: a minimal
 WebSocket client performs the handshake, sends fw_start(size, keyhash)
-with the build-constant keyhash (same source as proto::fw_upg),
-streams the payload in 10240-byte binary frames, sends fw_end, then
-polls /api/info until the device finished the embassy-boot swap.
-Note: triggers a real (same-image, auto-confirmed) swap.
+with the keyhash the device reports via /api/info (so a key rotation only
+touches the firmware), streams the payload in 10240-byte binary frames,
+sends fw_end, then polls /api/info until the device finished the
+embassy-boot swap. Note: triggers a real (same-image, auto-confirmed) swap.
 """
 import base64
 import hashlib
@@ -23,8 +23,21 @@ import urllib.request
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 IP = sys.argv[1] if len(sys.argv) > 1 else "192.168.12.101"
 PATH = sys.argv[2] if len(sys.argv) > 2 else os.path.join(ROOT, "build", "app.dfu.bin")
-KEYHASH = bytes.fromhex(
-    "7cb9c1c5524df6bda973b751dad4201d2d5d8908668eafdf4419239969c6851f")
+
+
+def resolve_keyhash(ip):
+    """Device-reported keyhash first; repo public key as offline fallback."""
+    try:
+        info = json.load(urllib.request.urlopen(f"http://{ip}/api/info", timeout=3))
+        kh = info.get("keyhash")
+        if isinstance(kh, str) and len(kh) == 64:
+            return bytes.fromhex(kh), "device /api/info"
+    except Exception:
+        pass
+    pub = os.path.join(ROOT, "keys", "ed25519.pub")
+    if os.path.isfile(pub):
+        return hashlib.sha256(open(pub, "rb").read()).digest(), "keys/ed25519.pub"
+    raise SystemExit("cannot resolve keyhash")
 
 
 class Ws:
@@ -88,12 +101,13 @@ class Ws:
 
 def main():
     img = open(PATH, "rb").read()
-    print(f"payload {len(img)} B")
+    keyhash, src = resolve_keyhash(IP)
+    print(f"payload {len(img)} B, keyhash {keyhash.hex()[:16]}... ({src})")
     ws = Ws(IP)
     t0 = time.time()
 
     ws.send(json.dumps({"cmd": "fw_start", "size": len(img),
-                        "keyhash": base64.b64encode(KEYHASH).decode()}).encode())
+                        "keyhash": base64.b64encode(keyhash).decode()}).encode())
     # fw_start reply comes after the erase; skip push frames until "t" absent
     while True:
         r = ws.recv_text(timeout=25)

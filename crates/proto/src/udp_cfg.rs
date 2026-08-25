@@ -28,15 +28,20 @@ pub const UDP_CMD_GET_IP: u8 = 0x11;
 pub const UDP_CMD_SET_MODBUS: u8 = 0x12;
 pub const UDP_CMD_GET_MODBUS: u8 = 0x13;
 pub const UDP_CMD_SET_TIME: u8 = 0x14;
+pub const UDP_CMD_GET_KEYHASH: u8 = 0x15;
 pub const UDP_CMD_FACTORY_RESET: u8 = 0x19;
 
 /// Firmware version pieces for the GET_VERSION reply "vM.m.p_git6".
+/// `keyhash` serves the GET_KEYHASH (0x15) reply: upgrade hosts fetch the
+/// device's signing-key fingerprint over the same UDP channel they upgrade
+/// through, so rotating the key only touches the firmware.
 #[derive(Clone, Copy)]
 pub struct UdpVersion {
     pub major: u8,
     pub minor: u8,
     pub patch: u8,
     pub git: &'static [u8; 6],
+    pub keyhash: &'static [u8; 32],
 }
 
 /// Two-step FACTORY_RESET / REBOOT pending state (transport-visible).
@@ -217,6 +222,17 @@ pub fn udp_app_cmd(
             reply_ok(reply, cmd, 1)
         }
 
+        // GET_KEYHASH: reply [cmd][keyhash 32B] — hosts upgrade over this
+        // same channel, so they fetch the fingerprint here (not via HTTP)
+        UDP_CMD_GET_KEYHASH => {
+            if reply.len() < 1 + ver.keyhash.len() {
+                return 0;
+            }
+            reply[0] = cmd;
+            reply[1..33].copy_from_slice(ver.keyhash);
+            33
+        }
+
         UDP_CMD_FACTORY_RESET => st.factory_reset(reply, cmd, now_ms, cfg),
 
         _ => 0, // unknown (incl. 0x01-0x06 fw upgrade): silent
@@ -232,6 +248,7 @@ pub fn udp_cmd_bcast_allowed(cmd: u8) -> bool {
 mod tests {
     use super::*;
     use crate::regmap::{RegHooks, RegMap};
+    use crate::fw_upg;
     use std::cell::RefCell;
 
     struct MockHooks {
@@ -265,7 +282,37 @@ mod tests {
             minor: 3,
             patch: 0,
             git: b"538a9b",
+            keyhash: &fw_upg::FW_KEYHASH,
         }
+    }
+
+    #[test]
+    fn get_keyhash_replies_fingerprint() {
+        let mut rep = [0u8; 64];
+        let mut r = RegMap::new(0x0300);
+        let mut h = MockHooks {
+            ts_val: RefCell::new(None),
+            ts_calls: RefCell::new(0),
+            saves: RefCell::new(0),
+        };
+        let mut c = MockCfg {
+            erases: RefCell::new(0),
+        };
+        let mut st = UdpCfgState::new();
+        let n = udp_app_cmd(
+            0x15,
+            &[],
+            &mut rep,
+            &mut r,
+            &mut h,
+            &mut c,
+            &mut st,
+            0,
+            &ver(),
+        );
+        assert_eq!(n, 33);
+        assert_eq!(rep[0], 0x15);
+        assert_eq!(&rep[1..33], &fw_upg::FW_KEYHASH[..]);
     }
 
     #[test]
@@ -719,7 +766,7 @@ mod tests {
             erases: RefCell::new(0),
         };
         let mut st = UdpCfgState::new();
-        for cmd in [0x01u8, 0x06, 0x00, 0x0F, 0x15, 0x20, 0xFF] {
+        for cmd in [0x01u8, 0x06, 0x00, 0x0F, 0x16, 0x20, 0xFF] {
             assert_eq!(
                 udp_app_cmd(
                     cmd,
