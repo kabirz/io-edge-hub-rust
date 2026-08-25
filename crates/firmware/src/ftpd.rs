@@ -139,7 +139,7 @@ async fn session(
                 // ConnectionReset here is usually a host-side FTP-aware
                 // filter resetting on a malformed PORT before it reaches us
                 let mut m = heapless::String::<64>::new();
-                use core::fmt::Write as _;
+
                 let _ = core::fmt::write(&mut m, core::format_args!("ftp: ctrl read err {:?}", e));
                 crate::log::err(&m);
                 return;

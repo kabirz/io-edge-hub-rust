@@ -14,8 +14,6 @@ import subprocess
 import sys
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-IMGTOOL = os.environ.get(
-    "IMGTOOL", r"C:\Users\jxwaz\code\io-edge-hub-freertos\deps\mcuboot\scripts\imgtool.py")
 KEY = os.path.join(ROOT, "keys", "root-rsa2048.pem")
 BIN = os.path.join(ROOT, "target", "thumbv7em-none-eabihf", "release", "io-edge-hub-fw.bin")
 OBJCOPY = os.path.join(os.path.expanduser("~"), ".cargo", "bin", "rust-objcopy.exe")
@@ -37,7 +35,7 @@ def main():
 
     version = open(os.path.join(ROOT, "VERSION")).read().split()[0]
     subprocess.run([
-        sys.executable, IMGTOOL, "sign", app_bin, signed,
+        'imgtool', "sign", app_bin, signed,
         "--key", KEY,
         "--header-size", "512", "--pad-header",
         "--align", "8", "--version", version,

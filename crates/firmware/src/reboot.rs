@@ -23,10 +23,12 @@ pub fn cold() {
 }
 
 /// Web/shell graceful reboot (~3s).
+#[allow(dead_code)]
 pub fn graceful() {
     schedule_delayed_ms(3000);
 }
 
+#[allow(dead_code)]
 pub fn cancel() {
     DEADLINE_MS.store(0, Ordering::Relaxed);
 }

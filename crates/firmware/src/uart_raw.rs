@@ -13,6 +13,7 @@ const RCC_APB2ENR: *mut u32 = 0x4002_3844 as *mut u32; // USART1EN
 
 // ---- GPIOA ----
 const GPIOA_MODER: *mut u32 = 0x4002_0000 as *mut u32;
+#[allow(dead_code)] // PA0-7 alternate-function regs; only PA9/PA10 (AFRH) wired
 const GPIOA_AFRL: *mut u32 = 0x4002_0020 as *mut u32;
 const GPIOA_AFRH: *mut u32 = 0x4002_0024 as *mut u32;
 
@@ -30,12 +31,12 @@ const DMA2_ST2_PAR: *mut u32 = (0x4002_6400 + 0x48) as *mut u32;
 const DMA2_ST2_M0AR: *mut u32 = (0x4002_6400 + 0x4C) as *mut u32;
 const DMA2_ST2_FCR: *mut u32 = (0x4002_6400 + 0x50) as *mut u32;
 
-const DMA_SxCR_EN: u32 = 1 << 0;
-const DMA_SxCR_CIRC: u32 = 1 << 8;
-const DMA_SxCR_MINC: u32 = 1 << 10;
-const DMA_SxCR_PSIZ_8: u32 = 0b00 << 11;
-const DMA_SxCR_MSIZ_8: u32 = 0b00 << 13;
-const DMA_SxCR_CHSEL_4: u32 = 0b100 << 25;
+const DMA_SX_CR_EN: u32 = 1 << 0;
+const DMA_SX_CR_CIRC: u32 = 1 << 8;
+const DMA_SX_CR_MINC: u32 = 1 << 10;
+const DMA_SX_CR_PSIZ_8: u32 = 0b00 << 11;
+const DMA_SX_CR_MSIZ_8: u32 = 0b00 << 13;
+const DMA_SX_CR_CHSEL_4: u32 = 0b100 << 25;
 
 pub const RX_RING: usize = 256;
 static mut RX_BUF: [u8; RX_RING] = [0; RX_RING];
@@ -70,12 +71,12 @@ pub fn init() {
         DMA2_ST2_M0AR.write_volatile(core::ptr::addr_of_mut!(RX_BUF) as u32);
         DMA2_ST2_NDTR.write_volatile(RX_RING as u32);
         DMA2_ST2_CR.write_volatile(
-            DMA_SxCR_CHSEL_4
-                | DMA_SxCR_MSIZ_8
-                | DMA_SxCR_PSIZ_8
-                | DMA_SxCR_MINC
-                | DMA_SxCR_CIRC
-                | DMA_SxCR_EN,
+            DMA_SX_CR_CHSEL_4
+                | DMA_SX_CR_MSIZ_8
+                | DMA_SX_CR_PSIZ_8
+                | DMA_SX_CR_MINC
+                | DMA_SX_CR_CIRC
+                | DMA_SX_CR_EN,
         );
     }
 }

@@ -444,8 +444,11 @@ fn panic(info: &core::panic::PanicInfo) -> ! {
             log::err("PANIC (no location)");
         }
     }
-    if let Some(p) = info.payload().downcast_ref::<&str>() {
-        log::err(p);
+    {
+        use core::fmt::Write as _;
+        let mut msg = heapless::String::<160>::new();
+        let _ = msg.write_fmt(format_args!("{}", info.message()));
+        log::err(&msg);
     }
     cortex_m::asm::udf()
 }

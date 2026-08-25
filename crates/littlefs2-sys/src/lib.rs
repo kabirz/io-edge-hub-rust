@@ -13,12 +13,12 @@ use core::ffi::{c_char, c_int, c_ulong};
 
 #[cfg(target_os = "none")]
 #[no_mangle]
-pub unsafe extern "C" fn strlen(s: *const c_char) -> c_ulong {
+pub unsafe extern "C" fn strlen(s: *const c_char) -> usize {
     let mut n = 0usize;
     while *s.add(n) != 0 {
         n += 1;
     }
-    n as c_ulong
+    n
 }
 
 #[cfg(target_os = "none")]

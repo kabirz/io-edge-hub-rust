@@ -123,7 +123,7 @@ pub fn usage() -> (u32, u32) {
 /// Smaller free = this task's polls dig deeper into the shared stack; the
 /// values are not additive across tasks.
 pub fn task_stat(slot: usize) -> (Option<u32>, u32) {
-    let lo = unsafe { core::ptr::addr_of!(_stack_end) as usize };
+    let lo = core::ptr::addr_of!(_stack_end) as usize;
     let s = STATS.lock(|c| c.borrow()[slot]);
     if s.min_sp == 0 {
         (None, s.loops)
@@ -140,11 +140,9 @@ pub fn statics_bytes() -> u32 {
 
 /// (used, total) of the CCM region (.ccm.bss: socket buffers etc.).
 pub fn ccm_usage() -> (u32, u32) {
-    unsafe {
-        let s = core::ptr::addr_of!(__sccm) as usize;
-        let e = core::ptr::addr_of!(__eccm) as usize;
-        ((e.saturating_sub(s)) as u32, 64 * 1024)
-    }
+    let s = core::ptr::addr_of!(__sccm) as usize;
+    let e = core::ptr::addr_of!(__eccm) as usize;
+    ((e.saturating_sub(s)) as u32, 64 * 1024)
 }
 
 /// Pattern-fill the not-yet-used stack below the current SP. Call once from

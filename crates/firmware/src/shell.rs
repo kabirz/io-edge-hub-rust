@@ -43,9 +43,8 @@ fn prompt() {
 /// Whole-line redraw: \r + prompt + line + clear-tail, cursor back to pos.
 fn redraw(line: &[u8], n: usize, pos: usize) {
     let mut buf = [0u8; LINE_MAX + 16];
-    let mut m = 0usize;
     buf[..5].copy_from_slice(b"\rio> ");
-    m = 5 + n;
+    let mut m = 5 + n;
     buf[5..m].copy_from_slice(&line[..n]);
     buf[m..m + 3].copy_from_slice(b"\x1b[K");
     m += 3;
@@ -1188,7 +1187,6 @@ pub async fn shell_task() {
                 let mut s = heapless::String::<12>::new();
                 let _ = core::fmt::write(&mut s, core::format_args!("\x1b[{}C", n - pos));
                 log::raw(s.as_bytes());
-                pos = n;
             }
             complete(&mut line, &mut n);
             pos = n;

@@ -254,6 +254,7 @@ fn hdr_content_len(hdr: &[u8]) -> usize {
     }
 }
 
+#[allow(dead_code)]
 fn hdr_has(hdr: &[u8], needle: &[u8]) -> bool {
     hdr_find(hdr, needle).is_some()
 }
@@ -744,11 +745,11 @@ async fn ws_session(sock: &mut TcpSocket<'static>, pending: &[u8]) {
     let mut fw_crc = 0u16;
 
     // frames complete inside the sync parser: queue replies, flush after
-    let mut step = |parser: &mut WsParser,
-                    data: &[u8],
-                    out: &mut heapless::Vec<u8, 768>,
-                    alive: &mut bool,
-                    fw_crc: &mut u16| {
+    let step = |parser: &mut WsParser,
+                data: &[u8],
+                out: &mut heapless::Vec<u8, 768>,
+                alive: &mut bool,
+                fw_crc: &mut u16| {
         *alive &= parser.feed(data, |p, ev| match ev {
             FeedEvent::Close => *alive = false,
             FeedEvent::Frame {

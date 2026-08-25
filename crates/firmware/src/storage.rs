@@ -522,7 +522,7 @@ fn hist_write(fs: &mut Filesystem<'_, LfsNor>, st: &mut HistState, d: &HisData) 
     // The littlefs I/O runs with the handle taken OUT of the critical
     // section: a sync can erase/program NOR for hundreds of ms and must
     // not mask interrupts (only this task touches OPEN_FILE's file)
-    let mut rotated = false;
+    let rotated;
     let mut file = critical_section::with(|_cs| {
         OPEN_FILE.lock(|o| o.borrow_mut().as_mut().and_then(|h| h.file.take()))
     });
@@ -610,7 +610,7 @@ fn open_append(
     }
     let alloc = unsafe { alloc_get(&FILE_ALLOC) };
     match unsafe { opts.open(fs, alloc, path) } {
-        Ok(mut file) => {
+        Ok(file) => {
             let ok = file.write(rec).is_ok();
             if ok {
                 let _ = file.sync();
@@ -705,11 +705,9 @@ pub async fn storage_task() {
     if WIPE_ON_BOOT {
         crate::log::wrn("lfs: MAINTENANCE WIPE of littlefs region");
         let mut off = LFS_OFFSET;
-        let mut done = 0u32;
         while off < 0x0100_0000 {
             nor_with(|w| w.erase(off, 4096));
             off += 4096;
-            done += 1;
             embassy_futures::yield_now().await; // feed wdt/net between blocks
         }
         crate::log::line("lfs: wipe done");
@@ -1012,7 +1010,7 @@ fn ftp_open_read(fs: &mut Filesystem<'_, LfsNor>, slot: u8, path: FtpPath, rest:
     opts.read(true);
     let alloc = unsafe { alloc_get(&FTP_ALLOC[slot]) };
     match unsafe { opts.open(fs, alloc, p) } {
-        Ok(mut file) => {
+        Ok(file) => {
             let mut size = file.len().unwrap_or(0) as u32;
             if rest > 0 {
                 if file.seek(lfs_io::SeekFrom::Start(rest)).is_err() {
@@ -1070,7 +1068,7 @@ fn ftp_open_write(fs: &mut Filesystem<'_, LfsNor>, slot: u8, path: FtpPath, mode
     }
     let alloc = unsafe { alloc_get(&FTP_ALLOC[slot]) };
     let ok = match unsafe { opts.open(fs, alloc, p) } {
-        Ok(mut file) => {
+        Ok(file) => {
             let seek_ok = match mode {
                 FtpWrMode::Append => file.seek(lfs_io::SeekFrom::End(0)).is_ok(),
                 FtpWrMode::Rest(pos) => file.seek(lfs_io::SeekFrom::Start(pos)).is_ok(),

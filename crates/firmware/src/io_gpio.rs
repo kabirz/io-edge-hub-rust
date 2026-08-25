@@ -38,6 +38,7 @@ pub fn set_do_led(val: u8) {
     });
 }
 
+#[allow(dead_code)]
 pub fn do_byte() -> u8 {
     critical_section::with(|_cs| {
         DO.lock(|o| {
