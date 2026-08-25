@@ -33,3 +33,4 @@ heapless = "0.8.0"
 
 [build-dependencies]
 flate2 = "1"
+chrono = "0.4"

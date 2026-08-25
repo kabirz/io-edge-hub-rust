@@ -1,3 +1,4 @@
+use chrono::Local;
 use std::env;
 use std::path::PathBuf;
 use std::process::Command;
@@ -31,7 +32,10 @@ fn main() {
     };
     std::fs::write(
         out.join("boot_version.rs"),
-        format!("pub const BOOT_BANNER: &str = \"io-edge-hub boot v{ver}_{git}\";\n"),
+        format!(
+            "pub const BOOT_BANNER: &str = \"io-edge-hub boot v{ver}_{git} ({})\";\n",
+            Local::now().format("%Y-%m-%d %H:%M:%S")
+        ),
     )
     .unwrap();
     println!("cargo:rerun-if-changed={}", root.join("VERSION").display());

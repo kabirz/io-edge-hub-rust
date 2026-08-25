@@ -16,3 +16,6 @@ embassy-embedded-hal = "0.6.0"
 embassy-boot = { version = "0.7.0", default-features = false }
 embedded-storage = "0.3.1"
 static_cell = "2"
+
+[build-dependencies]
+chrono = "0.4"

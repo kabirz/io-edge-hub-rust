@@ -1,3 +1,4 @@
+use chrono::Local;
 use std::env;
 use std::path::PathBuf;
 use std::process::Command;
@@ -42,7 +43,7 @@ fn main() {
         _ => "000000".to_string(),
     };
     let fw_version = format!("v{ver}_{git}");
-    let build_stamp = "Aug 23 2026 00:00:00"; // __DATE__ __TIME__ equivalent
+    let build_stamp = Local::now().format("%Y-%m-%d %H:%M:%S").to_string();
                                               // single-digit components for the Modbus version register (maj<<12|min<<8|patch)
     let parts: Vec<u32> = ver
         .split('.')
