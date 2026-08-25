@@ -1,9 +1,12 @@
 [build]
 target = "thumbv7em-none-eabihf"
 
+# C toolchain for the vendored littlefs: bare names, resolved from PATH, so
+# the same file builds on Windows (Arm GNU Toolchain bin dir on PATH) and
+# Linux (distro arm-none-eabi-gcc / xpack / SDK toolchain on PATH).
 [env]
-CC_thumbv7em_none_eabihf = "C:\\Program Files (x86)\\Arm GNU Toolchain arm-none-eabi\\14.3 rel1\\bin\\arm-none-eabi-gcc.exe"
-AR_thumbv7em_none_eabihf = "C:\\Program Files (x86)\\Arm GNU Toolchain arm-none-eabi\\14.3 rel1\\bin\\arm-none-eabi-ar.exe"
+CC_thumbv7em_none_eabihf = "arm-none-eabi-gcc"
+AR_thumbv7em_none_eabihf = "arm-none-eabi-ar"
 
 [target.'cfg(all(target_arch = "arm", target_os = "none"))']
 rustflags = ["-C", "link-arg=-Tlink.x", "-C", "link-arg=-Tccram.x"]
