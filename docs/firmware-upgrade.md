@@ -206,7 +206,7 @@ GET_VERSION 轮询     ──►  应答版本
 | 0x102 | 设→主 | 8 | `[code LE32][arg LE32]` | 平台应答 |
 | 0x103 | 主→设 | ≤8 | 原始数据 | 顺序追加(无偏移) |
 | 0x104 | 主→设 | ≤8 | `[seq][keyhash 分片 ≤7B]` | keyhash 32B 按 7B×5 片(seq 0-4) |
-| 0x105 | 设→主 | ≤8 | `[seq][版本串分片 ≤7B]` | VERSION 应答的分片序列 |
+| 0x105 | 设→主 | ≤8 | `[seq][分片 ≤7B]` | 设备→主机的分片数据帧(VERSION 的 ASCII 串 / KEYHASH 的原始字节) |
 
 命令字(0x101 的 cmd):
 
@@ -215,6 +215,7 @@ GET_VERSION 轮询     ──►  应答版本
 | 0 START | size(含 64B 签名) | **无条件重开会话**(先 abort 清残留);若 5 片 keyhash 已收齐则校验。应答 `CODE_OFFSET(0),0`;keyhash 错 → `CODE_KEYHASH_ERROR(6)` |
 | 1 CONFIRM | 0 | `finish(None)`:无 CRC 比对,直接回读 + **ed25519 验签** + SWAP 魔数。成功应答 `CODE_CONFIRM(3), 0x55AA55AA`;失败 `CODE_TRANSFER_ERROR(5)` |
 | 2 VERSION | — | 先 `CODE_VERSION(2), 串长`,随后 0x105 分片发出 `v0.3.0_abc123` |
+| 4 KEYHASH | — | 先 `CODE_KEYHASH(7), 32`,随后 5 帧 0x105 `[seq][≤7B 原始字节]`(定位 seq*7)发出设备 keyhash——**CAN 上位机升级前自报获取**,与 UDP 0x15 / `/api/info` 对齐 |
 | 3 REBOOT | — | **无应答**:100ms 挥手窗口 → 历史同步 → 500ms → 复位 |
 
 数据流控(0x103):设备每收到 **64B 整倍数**回一帧 `CODE_OFFSET(0), received`;
@@ -260,7 +261,7 @@ python tools\sign.py
 |---|---|---|
 | Web 页面 | `/api/info` 的 `keyhash` 字段(浏览器不能发 UDP) | 旧固件无字段 → 不带 keyhash,验签兜底 |
 | UDP 工具(fwupd_udp / 上位机) | **UDP 0x15 设备自报**(与升级同通道) | `keys/ed25519.pub` 现算 / 内置常量(过渡期可用) |
-| 上位机 CAN 通道(设备无 IP) | exe 旁 `ed25519.keyhash` 文件 | 内置常量(过渡期可用) |
+| 上位机 CAN 通道 | **CAN 0x101 cmd=4 设备自报**(与升级同通道) | exe 旁 `ed25519.keyhash` 文件 / 内置常量(过渡期可用) |
 
 ### 5.2 SWD 烧写(制造/恢复)
 

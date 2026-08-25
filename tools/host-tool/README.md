@@ -10,7 +10,7 @@
 |---|---|---|
 | 升级载荷 | imgtool 签名镜像(magic+TLV) | `app.dfu.bin` = 裸镜像 + 尾部 64B ed25519 签名 |
 | 载荷校验 | 解析 MCUboot 头 + TLV info | 长度 ∈ (64B, 512K];识别旧 MCUboot magic 并明确拒绝 |
-| keyhash | 从镜像 KEYHASH TLV 提取 | **设备自报**:UDP 通道升级前问设备(0x15);CAN 通道读 exe 旁 `ed25519.keyhash`;兜底内置常量 |
+| keyhash | 从镜像 KEYHASH TLV 提取 | **设备自报**:UDP 通道问设备(0x15),CAN 通道问设备(0x101 cmd=4);兜底 exe 旁 `ed25519.keyhash` / 内置常量 |
 | 验签 | bootloader 端 RSA | 设备应用端 salty ed25519(FW_END 时,约 1s) |
 | 换机语义 | slot1 + trailer,SWAP_USING_SCRATCH | DFU 暂存 + state 魔数,重启后逐页互换(约 30s) |
 | 升级后 | 重启即换 | 重启换机,新镜像跑通 main 自动确认,否则自动回滚 |
