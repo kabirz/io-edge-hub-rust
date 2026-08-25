@@ -195,7 +195,7 @@ async fn handle_platform(
             } else {
                 None
             };
-            let rc = fw::start(arg, kh);
+            let rc = fw::start(arg, kh).await;
             if rc == -2 {
                 crate::log::wrn("fwcan: keyhash mismatch");
                 fw_reply(tx, CODE_KEYHASH_ERROR, 0).await;
@@ -215,16 +215,16 @@ async fn handle_platform(
                 fw_reply(tx, CODE_TRANSFER_ERROR, 0).await;
                 return;
             }
-            if !fw::finish(None) {
+            // No CRC on the CAN channel: the readback still verifies the
+            // programming result; image integrity gating is the app-side
+            // trial boot (revert if the new image never confirms).
+            if !fw::finish(None).await {
                 crate::log::wrn("fwcan: confirm verify failed");
                 fw_reply(tx, CODE_TRANSFER_ERROR, 0).await;
                 return;
             }
-            if !fw::boot_set_pending(arg != 0) {
-                crate::log::err("fwcan: boot_set_pending failed");
-                fw_reply(tx, CODE_TRANSFER_ERROR, 0).await;
-                return;
-            }
+            // `arg != 0` (permanent request) is accepted but no longer
+            // changes bootloader semantics — every update boots as a trial.
             crate::log::inf("fwcan: confirmed, awaiting reboot");
             fw_reply(tx, CODE_CONFIRM, CONFIRM_MAGIC).await;
         }
@@ -266,6 +266,11 @@ async fn handle_fw_data(tx: &mut CanTx<'static>, data: &[u8]) {
     }
     if !fw::write(data) {
         crate::log::err("fwcan: write failed");
+        fw_reply(tx, CODE_FLASH_ERROR, 0).await;
+        return;
+    }
+    if !fw::flush().await {
+        crate::log::err("fwcan: flash write failed");
         fw_reply(tx, CODE_FLASH_ERROR, 0).await;
         return;
     }

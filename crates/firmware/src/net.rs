@@ -390,7 +390,7 @@ async fn fw_udp_cmd(cmd: u8, payload: &[u8]) -> Option<([u8; 8], usize)> {
             } else {
                 None
             };
-            let rc = crate::fw::start(total, kh);
+            let rc = crate::fw::start(total, kh).await;
             crate::log::inf("fwupg: start");
             let mut rep = [0u8; 8];
             rep[0] = 0x01;
@@ -409,6 +409,7 @@ async fn fw_udp_cmd(cmd: u8, payload: &[u8]) -> Option<([u8; 8], usize)> {
                 return Some(([0; 8], 0));
             }
             crate::fw::write(payload);
+            let _ = crate::fw::flush().await;
             let mut rep = [0u8; 8];
             rep[0] = 0x02;
             rep[1..5].copy_from_slice(&crate::fw::received().to_le_bytes());
@@ -429,30 +430,33 @@ async fn fw_udp_cmd(cmd: u8, payload: &[u8]) -> Option<([u8; 8], usize)> {
                 let mut data = &payload[4..];
                 while !data.is_empty() {
                     let n = data.len().min(256);
-                    crate::fw::write(&data[..n]);
+                    if !crate::fw::write(&data[..n]) {
+                        break;
+                    }
                     data = &data[n..];
                     if !data.is_empty() {
                         embassy_futures::yield_now().await;
                     }
                 }
+                let _ = crate::fw::flush().await;
             }
             let mut rep = [0u8; 8];
             rep[0] = 0x06;
             rep[1..5].copy_from_slice(&crate::fw::received().to_le_bytes());
             Some((rep, 5))
         }
-        // END [test u8][crc LE16] -> [03][ok]
+        // END [test u8][crc LE16] -> [03][ok]. The test/permanent byte stays
+        // in the wire format for host compatibility but no longer changes
+        // bootloader semantics: every update boots as a trial and is
+        // confirmed by the app ~10 s after boot.
         0x03 => {
             if payload.len() < 3 {
                 return Some(([0; 8], 0));
             }
-            let permanent = payload[0] == 0;
             let crc = u16::from_le_bytes([payload[1], payload[2]]);
             let mut ok = 0u8;
-            if crate::fw::finish(Some(crc)) {
-                if crate::fw::boot_set_pending(permanent) {
-                    ok = 1;
-                }
+            if crate::fw::finish(Some(crc)).await {
+                ok = 1;
             }
             crate::log::inf("fwupg: end");
             Some(([0x03, ok, 0, 0, 0, 0, 0, 0], 2))

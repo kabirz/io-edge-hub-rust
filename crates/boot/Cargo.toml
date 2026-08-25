@@ -1,0 +1,20 @@
+[package]
+name = "io-edge-hub-boot"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "io-edge-hub-boot"
+test = false
+bench = false
+
+[dependencies]
+io-edge-hub-proto = { path = "../proto" }
+
+cortex-m = { version = "0.7.7", features = ["critical-section-single-core"] }
+cortex-m-rt = "0.7.5"
+
+embassy-stm32 = { version = "0.6.0", features = ["stm32f407ve"] }
+embassy-boot = "0.6.1"
+embedded-storage = "0.3.1"

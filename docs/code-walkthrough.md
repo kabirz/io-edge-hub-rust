@@ -8,7 +8,7 @@
 
 - 目标硬件:LCKFB STM32F407VET6(168 MHz,512 K Flash,128 K SRAM + 64 K CCM)
   + W5500(SPI2) + W25Q128 NOR(SPI1)
-- 固件形态:no_std + embassy 异步执行器,MCUboot 签名镜像
+- 固件形态:no_std + embassy 异步执行器;引导器 embassy-boot(boot/ACTIVE 片内,DFU/STATE 外置)
 - 行为基准:C/FreeRTOS 版固件,93 项 e2e 全绿,盘上格式兼容
 
 ## 目录
@@ -31,7 +31,7 @@
    - [net.rs:W5500 组网与 UDP 服务](#43-netrsw5500-组网与-udp-服务)
    - [storage.rs:NOR 唯一所有者(本项目最核心的文件)](#44-storagersnor-唯一所有者本项目最核心的文件)
    - [w25q.rs:NOR 驱动](#45-w25qrsnor-驱动)
-   - [fw.rs / fw_can.rs:三条升级通道的会话层与 CAN 通道](#46-fwrs--fw_canrs三条升级通道的会话层与-can-通道)
+   - [升级体系:embassy-boot 引导器 + fw.rs + fw_can.rs](#46-升级体系embassy-boot-引导器--fwrs--fw_canrs-can-通道)
    - [httpd.rs / ftpd.rs / mbtcp.rs:TCP 服务三件套](#47-httpdrs--ftpdrs--mbtcprstcp-服务三件套)
    - [shell.rs / uart_raw.rs / log.rs:控制台三件套](#48-shellrs--uart_rawrs--logrs控制台三件套)
    - [sampling.rs / io_gpio.rs / systime.rs:IO 与时间](#49-samplingrs--io_gpiors--systimersio-与时间)
@@ -46,11 +46,14 @@
 
 ```
 ┌─────────────────────────────────────────────────────────────┐
+│ crates/boot       embassy-boot 引导器(bin,独立链接)         │
+├─────────────────────────────────────────────────────────────┤
 │ crates/firmware   embassy 任务、外设驱动、业务粘合            │
 │                   (不可主机测试,只能上硬件/e2e)              │
 ├─────────────────────────────────────────────────────────────┤
 │ crates/proto      协议与纯逻辑:解码器、状态机、编解码、数学    │
-│                   (零依赖,cargo test 直接在主机跑)           │
+│                   (零依赖,cargo test 直接在主机跑;           │
+│                    fw_upg::partitions 与引导器共用)           │
 ├─────────────────────────────────────────────────────────────┤
 │ crates/littlefs2-sys  vendored littlefs 2.11 + 手写 FFI 绑定 │
 └─────────────────────────────────────────────────────────────┘
@@ -106,13 +109,13 @@ codegen-units = 1
 ### 链接脚本(memory.x / ccram.x)
 
 ```
-FLASH : ORIGIN = 0x08010200, LENGTH = 0x6FE00   /* slot0 + 512B MCUboot 头 */
+FLASH : ORIGIN = 0x08020000, LENGTH = 0x60000   /* embassy-boot ACTIVE 槽 */
 RAM   : ORIGIN = 0x20000000, LENGTH = 128K
 CCRAM : ORIGIN = 0x10000000, LENGTH = 64K
 ```
 
-应用不放在 Flash 起始处,而是 slot0 + 0x200:`imgtool sign --header-size 512
---pad-header` 在签名时把 MCUboot 镜像头填进前 512 字节,所以链接地址必须让开。
+应用直接链在 ACTIVE 槽起点(普通 bin,无镜像头、无签名步骤);片内
+0x08000000..0x08020000 是引导器 BOOT 区(crates/boot,见 §4.6 的分区表)。
 
 `ccram.x` 定义 `.ccm.bss (NOLOAD)` 段并 `INSERT AFTER .got`。两个细节:
 
@@ -288,18 +291,17 @@ generation 高者胜、有效者胜、双无效回落出厂默认。`config_stor
 
 ### 3.8 fw_upg:升级协议原语
 
+- **分区表 `partitions`**:embassy-boot 四分区的唯一权威定义(BOOT/ACTIVE
+  片内,STATE/DFU 外置 W25Q),固件与引导器共用。页大小 =
+  max(ACTIVE::ERASE_SIZE=128K 片内最大扇区, DFU::ERASE_SIZE=4K) = 128K;
+  单测锁死全部 embassy-boot 不等式(ACTIVE 整扇区、DFU ≥ ACTIVE+1 页、
+  STATE 容量 ≥ 2+2×页数);
 - **CRC16-CCITT**(反射 0x1021/init 0,KERMIT,check 0x2189):与上位机
-  `fwupd.py` 完全一致。终验 CRC 对的是**从 slot1 读回的字节**而非发送侧,
+  助手完全一致。终验 CRC 对的是**从 DFU 槽读回的字节**而非发送侧,
   即校验的是编程结果本身;
-- **KEYHASH**:`FW_KEYHASH` 是签名公钥 DER 的 SHA-256(硬编码,与 imgtool
-  写进镜像 TLV 的一致)。`image_tlv_pos` 解析 MCUboot 镜像头(magic
-  0x96F3B83D,hdr_size@8,img_size@12)定位 TLV 块;`keyhash_in_tlv` 按
-  imgtool 的 4 字节对齐规则遍历 TLV(tag LE16+len LE16+data+padding)找
-  tag 0x01 len 32;
-- **trailer 偏移**:bootutil 公式在 BOOT_MAX_ALIGN==8 下的常量折叠——
-  magic=SLOT1_SIZE-16,image_ok=ALIGN_DOWN(magic-8,8),copy_done/-8,
-  swap_info/-8,swap_size/-8(S=0x70000 时依次 0x6FFF0/0x6FFE8/...)。
-  `boot_set_pending` 就往这几个偏移写标志;
+- **KEYHASH**:`FW_KEYHASH` 是签名公钥 DER 的 SHA-256。MCUboot 时代它是
+  镜像 TLV 校验;现在降级为 START 命令的"对设备"门禁(客户端可选携带,
+  不匹配即拒收),不再做镜像级密码学验证;
 - `b64_decode`:WS fw_start 的 keyhash 字段(44 字符 → 32 字节)。
 
 ### 3.9 ftp:PORT/EPRT 解析
@@ -316,11 +318,11 @@ generation 高者胜、有效者胜、双无效回落出厂默认。`config_stor
 ### 4.1 main.rs:启动序列与任务布局
 
 main() 开头是一段容易被误解的手写寄存器序列,原因写在注释里:
-MCUboot `boot_jump_vec()` 跳转前置 PRIMASK 且 cortex-m-rt 不会清它,
+引导器(embassy-boot)跳转前屏蔽中断且 cortex-m-rt 不会清它,
 而 bootloader 的跳转只清了 NVIC ICPR[0]。于是:
 
 ```text
-SCB.VTOR ← 0x0801_0200          // 我们自己的向量表
+SCB.VTOR ← 0x0802_0000          // ACTIVE 槽起点 = 我们的向量表
 NVIC ICER[0..3] ← 全 1           // 关闭 bootloader 留下的使能
 NVIC ICPR[0..3] ← 全 1           // 清 pending
 EXTI RTSR/FTSR/IMR ← 0, PR ← 全 1 // 抹掉 loader 的 EXTI 配置
@@ -435,9 +437,13 @@ CTRL_QUEUE : Channel<CriticalSectionRawMutex, StorageCmd, 4>  // 控制,绝不�
 
 C 版只有一个队列,历史的洪流可能把刚确认的"保存参数"挤掉——Rust 版
 拆成双车道并用 `select` 同时消费,控制命令(配置保存/恢复出厂)不再可能
-被挤掉。`StorageCmd` 枚举覆盖 17 种操作:Write(HisData)/CloseKeepName/Sync/
-CfgSave/CfgEraseAll/SnapReq/Del/FileOpen/FileChunk,以及 FTP 的
-Stat/Ls/OpenRead/OpenWrite/WriteChunk/CloseWrite/ReadChunk/Remove/Mkdir/Rename。
+被挤掉。`StorageCmd` 枚举覆盖 17 种文件/配置操作:Write(HisData)/
+CloseKeepName/Sync/CfgSave/CfgEraseAll/SnapReq/Del/FileOpen/FileChunk,以及 FTP 的
+Stat/Ls/OpenRead/OpenWrite/WriteChunk/CloseWrite/ReadChunk/Remove/Mkdir/Rename,
+外加升级 RPC:FwBegin(整槽擦除)/FwProg(写 256B 页)/FwRead(读 256B)/
+FwMarkUpdated / FwMarkBooted——embassy-boot 的 updater 对象在 storage 任务内
+构造,通过零尺寸适配器(FwDfuNor/FwStateNor)访问外部 DFU/STATE 分区,
+每次硬件操作各自拿 NOR 锁(与 LfsNor 同款模式)。
 
 **RPC 应答模式**:没有回调,而是共享结果寄存器 + 代际号:
 
@@ -505,28 +511,61 @@ SPI1 阻塞轮询 @42MHz(无 DMA 无中断——驱动被 ThreadModeRawMutex 保
 - write 强制 ≤256B 且不跨页(NOR 页编程约束),调用方(LfsNor::write)
   负责按页切分。
 
-### 4.6 fw.rs / fw_can.rs:三条升级通道的会话层与 CAN 通道
+### 4.6 升级体系:embassy-boot 引导器 + fw.rs 会话 + fw_can.rs CAN 通道
 
-三条通道(UDP v2、WebSocket 二进制、CAN)共用 `fw.rs` 这一个会话:
+**引导器(crates/boot,独立 bin)**:embassy-boot 库 + 两块 flash 的适配器。
+分区几何定义在 proto::fw_upg::partitions(§3.8),固件与引导器共用:
+
+| 分区 | 介质 | 地址 | 大小 |
+|---|---|---|---|
+| BOOTLOADER | 片内 | 0x08000000 | 128K(实际 ~8K) |
+| ACTIVE | 片内 | 0x08020000 | 384K = 三个 128K 整扇区 |
+| STATE | W25Q | 0x000000 | 4K |
+| DFU | W25Q | 0x001000 | 512K |
+
+关键约束与决策:
+
+- **页 = 128K**:embassy-boot 页大小取 max(ACTIVE::ERASE_SIZE,
+  DFU::ERASE_SIZE),而 F407 内部 flash 扇区非均匀(16K/64K/128K)、HAL 上报
+  ERASE_SIZE=最大值。若页小于物理扇区,换区算法擦一页会毁掉同扇区邻居
+  (它们还没备份到 DFU)——直接变砖。所以 ACTIVE 必须取整扇区倍数,
+  让每个 128K 页恰好对应一个物理扇区;DFU ≥ ACTIVE+1 页 → 512K;
+- **prepare_boot 缓冲只需整除页大小**(拷贝循环按缓冲步进):用 4KB 静态
+  缓冲即可,不需要 128K;
+- **STATE 不要求页对齐**,只要求容量/WRITE_SIZE ≥ 2+2×ACTIVE 页数(8 字节);
+- **IWDG 跨复位运行**:应用已 unleash 的看门狗在软复位后继续计数,引导器
+  里每次长操作都喂狗(W25Q 忙等轮询内联写 KR;内部扇区擦除前后各喂一次);
+- **外部 flash 缺失不挡启动**:JEDEC 校验失败就跳过整个 swap 机构直接
+  引导 ACTIVE——宁可放弃 OTA 能力也不变砖;
+- 跳转前关中断 + 清 NVIC ICER/ICPR(应用的启动序列依赖这个契约)。
+
+**fw.rs 会话层**:三条通道(UDP v2、WebSocket 二进制、CAN)共用一个会话,
+flash 操作全部走 storage 任务 RPC(FwBegin/FwProg/FwRead/FwMarkUpdated):
 
 ```rust
-struct FwSession { active, failed, total, written, page: [u8;256], page_len }
-static FW: Mutex<ThreadModeRawMutex, RefCell<FwSession>>;
+static FW:   Mutex<ThreadModeRawMutex, RefCell<Sess>>;   // active/total/received/页缓冲
+static RING: Mutex<CriticalSectionRawMutex, RefCell<Ring>>; // 待编程页环 ×12
 ```
 
-- `start(total, keyhash)`:忙(-3)/尺寸非法(-1)/keyhash 不匹配(-2)/
-  擦除失败(-1)。**无条件整槽擦除**——trailer 区不干净的话后面
-  `boot_set_pending` 会写失败;
-- `write(data)`:256B 页缓冲,超 total 置 failed;
-- `finish(crc)`:flush 尾页 → written==total 检查 → **64B 一块读回算
-  CRC16**(校验编程结果)→ TLV keyhash 校验。诊断全程写 `FW_DBG`
-  (UDP 0xFB 可读:阶段码/写入量/计算与期望 CRC/首尾 16 字节);
-- `boot_set_pending(permanent)`:向 slot1 尾部手写 trailer——BOOT_MAGIC →
-  image_ok(仅 PERMANENT)→ swap_info(PERM=3/TEST=2),偏移来自 §3.8
-  的公式。这就是"不依赖 bootloader API 的 SWAP_USING_SCRATCH 请求",
-  与 C 版逐字节一致。
+- `start(total, keyhash)`(**async**):忙(-3)/尺寸非法(-1)/keyhash
+  不匹配(-2)/擦除失败(-1)。FwBegin 让 updater `prepare_update()` 整槽
+  擦除(~1-2s,与 MCUboot 时代语义一致);
+- `write(data)`(**同步!**):只做 256B 页缓冲 + 入待编程环,不碰 flash——
+  WS 解析回调是同步的,二进制帧在这里无阻塞入队;环满 = 传输失败;
+- `flush()`(**async**):把环逐页经 FwProg RPC 写入 DFU(updater 的懒擦除
+  此时不会触发,槽已在 START 擦净);UDP/CAN 每包后调用,WS 在读事件臂调用;
+- `finish(crc)`(**async**):先 flush → received==total 校验 → **256B 一块
+  从 DFU 读回算 CRC16**(校验的是编程结果而非发送侧)→ 有期望 CRC 则比较
+  → FwMarkUpdated 置 SWAP_MAGIC,下次重启引导器交换。诊断全程写 `FW_DBG`
+  (UDP 0xFB 可读:阶段码/写入量/计算与期望 CRC)。
 
-`fw_can.rs` 是 bxCAN 通道,几个非显而易见的决策:
+**试用启动与回滚**: embassy-boot 无 test/permanent 之分——新固件总是试用
+启动,应用在心跳任务里开机 ~10s 后发 FwMarkBooted 确认(存储任务 handler
+仅在 state==Swap 时执行 mark_booted);10s 内没跑到确认(panic 循环、
+砖化驱动等)则下次复位自动回滚旧版。UDP END 的 permanent 字节和 CAN
+CONFIRM 的 arg 保留在线格式里但不再影响语义。
+
+`fw_can.rs`(bxCAN 通道)的非显而易见决策:
 
 - **TX 不用 BufferedCanTx 而用裸 `CanTx::write`**:embassy 0.6 的 buffered TX
   在邮箱里有同 ID 帧挂起时会拿到 WouldBlock 并**丢弃 ring 里已出队的帧**
@@ -539,9 +578,9 @@ static FW: Mutex<ThreadModeRawMutex, RefCell<FwSession>>;
 - 波特率快照自寄存器,50k-1000k 支持,**800k 不可实现**(PCLK1 42MHz
   算不出位时序),回落 250k;
 - 协议:0x101 命令(START 无条件重开,keyhash 仅当 0x104 五片凑齐才校验;
-  CONFIRM 不带 CRC——完整性由 MCUboot 签名把关;REBOOT 不回帧,排水
-  100ms → Sync → 500ms → 复位)/ 0x102 回复 / 0x103 数据 / 每 64B 一个
-  OFFSET 流控(Zephyr 权威语义)。
+  CONFIRM 不带 CRC——读回校验仍在,CRC 门禁交给试用回滚;REBOOT 不回帧,
+  排水 100ms → Sync → 500ms → 复位)/ 0x102 回复 / 0x103 数据 /
+  每 64B 一个 OFFSET 流控(Zephyr 权威语义)。
 
 ### 4.7 httpd.rs / ftpd.rs / mbtcp.rs:TCP 服务三件套
 
@@ -558,8 +597,10 @@ static FW: Mutex<ThreadModeRawMutex, RefCell<FwSession>>;
   并等 50ms 让 503 被 ACK 再 abort(RST 吃掉未 ACK 数据客户端就看不到错误);
 - WS 会话:`select3(sock.read, 1s push ticker, 10s info ticker)`;
   帧解析在同步回调里入队(heapless Vec<768>),async 循环统一 flush;
-  文本帧是 JSON 命令(do/reg/time/cfg/save/factory_reset/fw_start/fw_end),
-  二进制帧直接灌 `fw::write` 并累计 CRC——第三条升级通道;
+  文本帧是 JSON 命令(do/reg/time/cfg/save 同步执行;fw_start/fw_end 只记入
+  `WsPlan` 由会话循环异步执行——它们要 await 存储 RPC),二进制帧同步灌
+  `fw::write`(纯内存页环)并在读事件后 `fw::flush().await` 落盘——
+  第三条升级通道;
 - REST API 表:`GET /api/info|io|regs|history|history/download?name=`,
   `POST /api/do|reg|time|save|reboot|cfg|history/delete`;未知路径按
   "已知路径错方法→405,否则 404";
@@ -748,6 +789,8 @@ double-init 检查提供零值前提。
 |---|---|---|
 | FACTORY_RESET 开机 5s 内单命令即生效(wrapping_sub 比较) | proto/udp_cfg.rs | `factory_reset_single_command_quirk_within_boot_5s` |
 | FC16 长度校验用整数除法 `num_bytes/reg_qty != 2` | proto/mb_server.rs | `fc16_write_regs_with_quirks` |
+| FACTORY_RESET 开机 5s 内单命令即生效(wrapping_sub 比较) | proto/udp_cfg.rs | `factory_reset_single_command_quirk_within_boot_5s` |
+| FC16 长度校验用整数除法 `num_bytes/reg_qty != 2` | proto/mb_server.rs | `fc16_write_regs_with_quirks` |
 | FP 区(≥5000)读回 ILLEGAL_FC 而非 DATA_ADDR | proto/mb_server.rs | `fc03_qty_violation_fp_area_exc1` |
 | proto != 0 的 server failure 早于广播检查处理 | proto/mbtcp_adu.rs | `proto_nonzero_server_failure` |
 | 历史文件名用手动 +8h 而非真时区 | proto/history.rs | `name_matches_c_format` |
@@ -755,4 +798,4 @@ double-init 检查提供零值前提。
 | 超长 URL 截断到 95 字节后 404(sscanf %95s 语义) | firmware/httpd.rs | parse_request_line 注释 |
 | info JSON 的 704B 缓冲上限(截断行为一致) | firmware/httpd.rs | build_info_json |
 | 历史记录 buffered write 不逐条 sync | firmware/storage.rs | hist_write 注释(erase storm) |
-| trailer 手写而非调 bootutil | firmware/fw.rs | boot_set_pending + fw_upg 常量测试 |
+| UDP END 的 permanent 字节保留但不改变语义(一律试用启动) | firmware/net.rs | fw_udp_cmd 注释 |

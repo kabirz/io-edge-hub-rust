@@ -9,15 +9,18 @@ use core::cell::{RefCell, UnsafeCell};
 use core::mem::MaybeUninit;
 use core::sync::atomic::{AtomicBool, Ordering};
 
+use embassy_boot::{BlockingFirmwareUpdater, FirmwareUpdaterConfig};
 use embassy_sync::blocking_mutex::raw::{CriticalSectionRawMutex, ThreadModeRawMutex};
 use embassy_sync::blocking_mutex::Mutex;
 use embassy_sync::channel::Channel;
+use embedded_storage::nor_flash::{NorFlash, NorFlashError, NorFlashErrorKind};
 use generic_array::typenum::consts::{U1024, U32};
 use littlefs2::driver::Storage;
 use littlefs2::fs::{Allocation, File, FileAllocation, Filesystem, OpenOptions};
 use littlefs2::io as lfs_io;
 
 use io_edge_hub_proto::config_store::{self as cs, IoCfg, CFG_SLOT_A, CFG_SLOT_B, CFG_SLOT_SIZE};
+use io_edge_hub_proto::fw_upg as fwup;
 use io_edge_hub_proto::history::{make_hist_name, HisData};
 use io_edge_hub_proto::regmap::{
     RegMap, HOLDING_AI_ENABLE_IDX, HOLDING_AI_SAMPLE_MS_IDX, HOLDING_CAN_BAUDRATE_IDX,
@@ -93,6 +96,17 @@ pub enum StorageCmd {
     FtpMkdir(FtpPath),
     /// FTP RPC: rename (result in FTP_RES).
     FtpRename(FtpPath, FtpPath),
+    /// embassy-boot RPC: erase the whole DFU slot (fw START). Result in FW_RES.
+    FwBegin,
+    /// embassy-boot RPC: write FW_STAGE[..len] to DFU at `off` (lazy per-sector
+    /// erase inside the updater). Result in FW_RES.
+    FwProg { off: u32, len: u16 },
+    /// embassy-boot RPC: read 256 B of DFU at `off` into FW_READ.
+    FwRead { off: u32 },
+    /// embassy-boot RPC: mark the DFU image for swap on next reboot.
+    FwMarkUpdated,
+    /// embassy-boot RPC: confirm the running (trial) image if a swap happened.
+    FwMarkBooted,
 }
 
 /// FTP path buffer (norm_path output can exceed 24 bytes).
@@ -265,6 +279,125 @@ pub static FTP_XFER: [Mutex<CriticalSectionRawMutex, RefCell<FtpXfer>>; 3] = [
 ];
 static FTP_ALLOC: [AllocCell; 3] = [AllocCell::new(), AllocCell::new(), AllocCell::new()];
 
+// ---- embassy-boot DFU/STATE adapters ----
+//
+// The upgrade session (fw.rs) runs in the transports' tasks but the W25Q is
+// owned by this task, so every flash op is an RPC into [handle_cmd]. The
+// updater objects are constructed per command here and talk to the chip
+// through these zero-sized adapters — each method takes the NOR mutex for the
+// duration of one hardware operation, exactly like LfsNor above.
+
+/// NOR flash error type for the adapters (the driver reports `()`).
+#[derive(Debug)]
+pub struct FwFlashErr;
+impl core::fmt::Display for FwFlashErr {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.write_str("w25q flash error")
+    }
+}
+impl NorFlashError for FwFlashErr {
+    fn kind(&self) -> NorFlashErrorKind {
+        NorFlashErrorKind::Other
+    }
+}
+
+fn nor_map<T>(
+    off: u32,
+    len: usize,
+    part_base: u32,
+    part_len: u32,
+    f: impl FnOnce(&mut crate::w25q::W25q, u32) -> Result<T, ()>,
+) -> Result<T, FwFlashErr> {
+    let end = off as usize + len;
+    if end > part_len as usize {
+        return Err(FwFlashErr);
+    }
+    nor_with(|w| f(w, part_base + off))
+        .unwrap_or(Err(()))
+        .map_err(|_| FwFlashErr)
+}
+
+macro_rules! fw_nor_flash {
+    ($name:ident, $base:expr, $len:expr) => {
+        pub(crate) struct $name;
+
+        impl embedded_storage::nor_flash::ReadNorFlash for $name {
+            const READ_SIZE: usize = 1;
+            fn read(&mut self, off: u32, buf: &mut [u8]) -> Result<(), FwFlashErr> {
+                nor_map(off, buf.len(), $base, $len, |w, a| w.read(a, buf))
+            }
+            fn capacity(&self) -> usize {
+                $len as usize
+            }
+        }
+
+        impl NorFlash for $name {
+            const WRITE_SIZE: usize = 1;
+            const ERASE_SIZE: usize = 4096;
+            fn write(&mut self, off: u32, data: &[u8]) -> Result<(), FwFlashErr> {
+                // callers may hand us multi-KB slices (embassy-boot's
+                // write_firmware splits per ERASE sector): split again at
+                // the 256 B program-page boundaries of the W25Q.
+                let mut off = off;
+                let mut rest = data;
+                while !rest.is_empty() {
+                    let chunk =
+                        (256 - (($base + off) % 256) as usize).min(rest.len());
+                    nor_map(off, chunk, $base, $len, |w, a| w.write(a, &rest[..chunk]))?;
+                    off += chunk as u32;
+                    rest = &rest[chunk..];
+                }
+                Ok(())
+            }
+            fn erase(&mut self, from: u32, to: u32) -> Result<(), FwFlashErr> {
+                if to < from {
+                    return Err(FwFlashErr);
+                }
+                nor_map(from, (to - from) as usize, $base, $len, |w, a| {
+                    w.erase(a, to - from)
+                })
+            }
+        }
+
+        impl embedded_storage::nor_flash::ErrorType for $name {
+            type Error = FwFlashErr;
+        }
+    };
+}
+
+fw_nor_flash!(FwDfuNor, fwup::partitions::DFU_BASE, fwup::partitions::DFU_LEN);
+fw_nor_flash!(
+    FwStateNor,
+    fwup::partitions::STATE_BASE,
+    fwup::partitions::STATE_LEN
+);
+
+/// Staging buffer for FwProg: the transport copies ≤256 B in under the cs,
+/// the storage task copies it out again before programming.
+pub static FW_STAGE: Mutex<CriticalSectionRawMutex, RefCell<[u8; 256]>> =
+    Mutex::new(RefCell::new([0xFF; 256]));
+/// Read result of FwRead (256 B chunk at the requested offset).
+pub static FW_READ: Mutex<CriticalSectionRawMutex, RefCell<[u8; 256]>> =
+    Mutex::new(RefCell::new([0; 256]));
+/// Result register for one-shot FW ops: (ok, state byte from embassy-boot).
+pub static FW_RES: Mutex<CriticalSectionRawMutex, RefCell<(bool, u8)>> =
+    Mutex::new(RefCell::new((false, 0)));
+
+/// Run `f` with an updater over the external DFU/STATE partitions. Call only
+/// from the storage task (each adapter op takes the NOR mutex internally).
+fn with_fw_updater<R>(f: impl FnOnce(&mut BlockingFirmwareUpdater<'_, FwDfuNor, FwStateNor>) -> R) -> R {
+    // aligned buffer must be exactly STATE::WRITE_SIZE (= 1) long
+    let mut aligned = [0; 1];
+    let mut up = BlockingFirmwareUpdater::new(
+        FirmwareUpdaterConfig {
+            dfu: FwDfuNor,
+            state: FwStateNor,
+        },
+        &mut aligned,
+    );
+    f(&mut up)
+}
+
 /// FTP write handle (STOR/APPE): persistent like the history file.
 pub(crate) struct WrFile(Option<File<'static, 'static, LfsNor>>);
 unsafe impl Send for WrFile {}
@@ -293,10 +426,30 @@ pub static FILE_DL: Mutex<CriticalSectionRawMutex, RefCell<FileDl>> =
         err: false,
     }));
 
-/// Generation counter for the web RPCs: bumped once per processed command.
-/// The httpd side snapshots it before sending and polls until it advances —
-/// no stale-signal races (a Signal latches old values and wakes immediately).
+/// Generation counter for the web/FTP/upgrade RPCs: bumped once per
+/// processed command. The caller side snapshots it before sending and polls
+/// until it advances — no stale-signal races (a Signal latches old values
+/// and wakes immediately).
 pub static RPC_SEQ: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(0);
+
+/// Wait until the storage task processed one more command (generation
+/// advance). Shared by httpd / ftpd / fw; 2.5 s bound matches every caller's
+/// previous private copies.
+pub async fn rpc_wait(seq_before: u32) -> bool {
+    let deadline = embassy_time::Instant::now() + embassy_time::Duration::from_millis(2500);
+    while RPC_SEQ.load(core::sync::atomic::Ordering::Relaxed) <= seq_before {
+        if embassy_time::Instant::now() >= deadline {
+            return false;
+        }
+        embassy_time::Timer::after_millis(2).await;
+    }
+    true
+}
+
+/// Snapshot RPC_SEQ before queueing a command.
+pub fn rpc_seq() -> u32 {
+    RPC_SEQ.load(core::sync::atomic::Ordering::Relaxed)
+}
 
 /// NOR access is serialized with ThreadModeRawMutex, NOT a critical section:
 /// SPI operations run 10-100+ ms (erase) and masking interrupts that long
@@ -872,8 +1025,60 @@ fn handle_cmd(fs: &mut Filesystem<'static, LfsNor>, st: &mut HistState, cmd: Sto
                 });
                 RPC_SEQ.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
             }
+            // ---- embassy-boot upgrade ops (DFU/STATE on the external NOR) ----
+            StorageCmd::FwBegin => {
+                let ok = with_fw_updater(|up| up.prepare_update().is_ok());
+                fw_res_set(ok, 0);
+                RPC_SEQ.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+            }
+            StorageCmd::FwProg { off, len } => {
+                let mut buf = [0u8; 256];
+                let len = (len as usize).min(buf.len());
+                critical_section::with(|_cs| {
+                    FW_STAGE.lock(|s| buf[..len].copy_from_slice(&s.borrow()[..len]));
+                });
+                let ok = with_fw_updater(|up| up.write_firmware(off as usize, &buf[..len]).is_ok());
+                fw_res_set(ok, 0);
+                RPC_SEQ.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+            }
+            StorageCmd::FwRead { off } => {
+                let mut buf = [0u8; 256];
+                let ok = with_fw_updater(|up| up.read_dfu(off, &mut buf).is_ok());
+                if ok {
+                    critical_section::with(|_cs| {
+                        FW_READ.lock(|r| *r.borrow_mut() = buf);
+                    });
+                }
+                fw_res_set(ok, 0);
+                RPC_SEQ.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+            }
+            StorageCmd::FwMarkUpdated => {
+                let res = with_fw_updater(|up| up.mark_updated().is_ok());
+                fw_res_set(res, 0);
+                RPC_SEQ.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+            }
+            StorageCmd::FwMarkBooted => {
+                // Only meaningful right after the bootloader swapped us in
+                // (state still carries SWAP_MAGIC); a no-op otherwise.
+                let (st, ok) = with_fw_updater(|up| match up.get_state() {
+                    Ok(embassy_boot::State::Swap) => (embassy_boot::State::Swap as u8, up.mark_booted().is_ok()),
+                    Ok(s) => (s as u8, true),
+                    Err(_) => (0, false),
+                });
+                if ok && st == embassy_boot::State::Swap as u8 {
+                    crate::log::inf("fw: trial boot confirmed");
+                }
+                fw_res_set(ok, st);
+                RPC_SEQ.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+            }
         }
     }
+}
+
+fn fw_res_set(ok: bool, state: u8) {
+    critical_section::with(|_cs| {
+        FW_RES.lock(|r| *r.borrow_mut() = (ok, state));
+    });
 }
 
 // ---- FTP storage ops ----

@@ -1,53 +1,111 @@
-//! Firmware-upgrade session over the W25Q slot1.
+//! Firmware-upgrade session over the embassy-boot DFU slot (external W25Q).
 //!
-//! start() gives 0 ok / -2 keyhash mismatch / -3 busy / -1 other. start()
-//! erases the whole slot (the trailer area at the slot tail must be clean or
-//! a later trailer write fails); writes are page-buffered; finish() flushes
-//! the tail, then verifies by reading slot1 back (CRC16 over the received
-//! image + TLV keyhash). NOR access goes through the storage task's driver
-//! mutex, so littlefs traffic and upgrade traffic serialize on the same SPI
-//! bus.
+//! The transports (UDP / WS / CAN) drive one shared session:
+//!
+//! - [`start`] validates size/keyhash and erases the whole DFU slot (RPC;
+//!   the storage task owns the chip);
+//! - [`write`] is **synchronous** — it only buffers into 256 B pages and
+//!   pushes them onto a pending-page ring — so the WS parser callback can
+//!   feed binary frames without awaiting. Transports drain the ring with
+//!   [`flush`]; [`finish`] drains whatever is left;
+//! - [`finish`] verifies sizes, re-reads the whole image back from DFU
+//!   (validating the programming result), compares the CRC16 when the
+//!   transport provided one, and marks the image updated (swap on next
+//!   reboot). Trial boot: the app confirms itself ~10 s after boot
+//!   (heartbeat -> FwMarkBooted); if it never runs, the bootloader reverts.
 
 use core::cell::RefCell;
 
-use embassy_sync::blocking_mutex::raw::ThreadModeRawMutex;
+use embassy_sync::blocking_mutex::raw::{CriticalSectionRawMutex, ThreadModeRawMutex};
 use embassy_sync::blocking_mutex::Mutex;
 use io_edge_hub_proto::fw_upg as upg;
 
-use crate::storage::nor_with;
+use crate::storage::{rpc_seq, rpc_wait, StorageCmd, FW_READ, FW_RES, FW_STAGE, QUEUE};
 
 const PAGE_SZ: usize = 256;
-const READ_CHUNK: usize = 64;
-const IMG_HDR_SIZE: u32 = 0x200;
-const TLV_READ: usize = 512;
+/// Pending-page ring depth (bytes of slack between transport and flash).
+/// Steady-state programming (~1 ms per 256 B page) outruns any transport;
+/// the ring only absorbs erase pauses. Overflow fails the transfer cleanly.
+const RING_MAX: usize = 12;
 
-struct FwSession {
+static FW: Mutex<ThreadModeRawMutex, RefCell<Sess>> = Mutex::new(RefCell::new(Sess::new()));
+
+struct Sess {
     active: bool,
     failed: bool,
     total: u32,
-    written: u32,
+    /// Bytes accepted so far (= offset the next incoming byte lands at).
+    received: u32,
     page: [u8; PAGE_SZ],
     page_len: usize,
 }
 
-// ThreadModeRawMutex, NOT a critical section (same reasoning as storage::NOR):
-// write()/start()/finish() run NOR page programs (0.4-3 ms), a whole-slot
-// erase (~2 s) and a full-image readback inside the lock — masking interrupts
-// that long overruns the 3-deep bxCAN RX FIFO at full bus speed and drops
-// ~3 frames per 256 B page. Sound because every caller is an embassy task in
-// thread mode, the closures hold no await (no interleaving), and no ISR
-// touches this state.
-static FW: Mutex<ThreadModeRawMutex, RefCell<FwSession>> = Mutex::new(RefCell::new(FwSession {
-    active: false,
-    failed: false,
-    total: 0,
-    written: 0,
-    page: [0; PAGE_SZ],
-    page_len: 0,
-}));
+impl Sess {
+    const fn new() -> Self {
+        Self {
+            active: false,
+            failed: false,
+            total: 0,
+            received: 0,
+            page: [0; PAGE_SZ],
+            page_len: 0,
+        }
+    }
+}
 
-/// Last finish() diagnostics (UDP debug cmd 0xFB): written/computed crc/
-/// expected crc/tlv ok + first and last 16 readback bytes.
+/// Pages accepted but not yet programmed, drained by [flush].
+static RING: Mutex<CriticalSectionRawMutex, RefCell<Ring>> =
+    Mutex::new(RefCell::new(Ring::new()));
+
+struct Ring {
+    off: [u32; RING_MAX],
+    len: [usize; RING_MAX],
+    data: [[u8; PAGE_SZ]; RING_MAX],
+    head: usize,
+    tail: usize,
+}
+
+impl Ring {
+    const fn new() -> Self {
+        Self {
+            off: [0; RING_MAX],
+            len: [0; RING_MAX],
+            data: [[0; PAGE_SZ]; RING_MAX],
+            head: 0,
+            tail: 0,
+        }
+    }
+    fn push(&mut self, off: u32, data: &[u8]) -> bool {
+        let next = (self.head + 1) % RING_MAX;
+        if next == self.tail {
+            return false;
+        }
+        self.off[self.head] = off;
+        self.len[self.head] = data.len();
+        self.data[self.head][..data.len()].copy_from_slice(data);
+        self.head = next;
+        true
+    }
+    /// Copy out the oldest entry and drop it from the ring.
+    fn pop_into(&mut self, buf: &mut [u8; PAGE_SZ]) -> Option<(u32, usize)> {
+        if self.tail == self.head {
+            return None;
+        }
+        let i = self.tail;
+        self.tail = (self.tail + 1) % RING_MAX;
+        *buf = self.data[i];
+        Some((self.off[i], self.len[i]))
+    }
+    fn clear(&mut self) {
+        self.head = 0;
+        self.tail = 0;
+    }
+}
+
+/// Diagnostics for UDP debug cmd 0xFB:
+/// [stage, received, total, computed crc, expected crc].
+/// Stages: 2 size/failed, 4 readback io, 5 crc mismatch, 6 DFU erase,
+/// 7 program, 8 mark-updated.
 pub static FW_DBG: Mutex<ThreadModeRawMutex, RefCell<[u32; 16]>> =
     Mutex::new(RefCell::new([0; 16]));
 
@@ -55,219 +113,187 @@ fn dbg_store(vals: &[u32; 16]) {
     FW_DBG.lock(|d| *d.borrow_mut() = *vals);
 }
 
-fn page_flush(s: &mut FwSession) -> bool {
-    if s.page_len > 0 {
-        let ok = matches!(
-            nor_with(|nor| nor.write(s.written, &s.page[..s.page_len])),
-            Some(Ok(()))
-        );
-        s.page_len = 0;
-        if !ok {
-            return false;
-        }
-    }
-    true
+fn fw_res_ok() -> bool {
+    critical_section::with(|_cs| FW_RES.lock(|r| r.borrow().0))
 }
 
-/// Whole-slot erase; caller checks active/keyhash/size first.
-fn erase_slot1() -> bool {
-    matches!(nor_with(|nor| nor.erase(0, upg::SLOT1_SIZE)), Some(Ok(())))
-}
-
-pub fn start(total: u32, keyhash: Option<&[u8; upg::FW_KEYHASH_LEN]>) -> i32 {
+/// Begin an upgrade session. Returns 0 ok / -2 keyhash mismatch / -3 busy /
+/// -1 other (bad size, DFU erase failure).
+pub async fn start(total: u32, keyhash: Option<&[u8; upg::FW_KEYHASH_LEN]>) -> i32 {
     let mut rc = 0i32;
     FW.lock(|f| {
-        let mut s = f.borrow_mut();
+        let s = f.borrow();
         if s.active {
             rc = -3;
-            return;
-        }
-        if total < 64 || total > upg::SLOT1_SIZE {
+        } else if total < 64 || total > upg::partitions::DFU_LEN {
             rc = -1;
-            return;
-        }
-        if let Some(kh) = keyhash {
+        } else if let Some(kh) = keyhash {
             if kh != &upg::FW_KEYHASH {
                 rc = -2;
-                return;
             }
         }
-        if !erase_slot1() {
-            rc = -1;
-            return;
-        }
+    });
+    if rc != 0 {
+        return rc;
+    }
+
+    // Whole-DFU erase up front (~1-2 s): deterministic clean slate, matching
+    // the MCUboot-era START semantics. The lazy per-sector erase inside
+    // write_firmware never fires afterwards (sectors are pre-erased).
+    let seq = rpc_seq();
+    QUEUE.try_send(StorageCmd::FwBegin).ok();
+    if !rpc_wait(seq).await || !fw_res_ok() {
+        dbg_store(&[6, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]);
+        return -1;
+    }
+
+    FW.lock(|f| {
+        let mut s = f.borrow_mut();
         s.active = true;
         s.failed = false;
         s.total = total;
-        s.written = 0;
+        s.received = 0;
         s.page_len = 0;
     });
-    rc
+    RING.lock(|r| r.borrow_mut().clear());
+    0
 }
 
+/// Accept upgrade payload synchronously (no flash access here): buffers into
+/// 256 B pages and queues them onto the pending ring. False = transfer must
+/// fail (session inactive/failed, oversize, or ring overflow).
 pub fn write(data: &[u8]) -> bool {
     FW.lock(|f| {
         let mut s = f.borrow_mut();
         if !s.active || s.failed {
             return false;
         }
-        if s.written + s.page_len as u32 + data.len() as u32 > s.total {
+        if s.received + s.page_len as u32 + data.len() as u32 > s.total {
             s.failed = true;
             return false;
         }
+        let mut ok = true;
         let mut data = data;
-        while !data.is_empty() {
+        while !data.is_empty() && ok {
             let plen = s.page_len;
             let chunk = (PAGE_SZ - plen).min(data.len());
+            let base_off = s.received;
             s.page[plen..plen + chunk].copy_from_slice(&data[..chunk]);
             s.page_len = plen + chunk;
+            s.received += chunk as u32;
             data = &data[chunk..];
             if s.page_len == PAGE_SZ {
-                if !page_flush(&mut s) {
+                ok = RING.lock(|r| r.borrow_mut().push(base_off, &s.page));
+                s.page_len = 0;
+                if !ok {
                     s.failed = true;
-                    return false;
                 }
-                s.written += PAGE_SZ as u32;
             }
         }
-        true
+        ok
     })
 }
 
-pub fn abort() {
-    FW.lock(|f| {
-        let mut s = f.borrow_mut();
-        s.active = false;
-        s.failed = false;
-        s.page_len = 0;
-        s.written = 0;
-    });
-}
-
-/// Flush + verify (readback CRC when `crc` is Some) + TLV keyhash check.
-/// Resets the session; `received()`/`total()` read 0 afterwards.
-pub fn finish(crc: Option<u16>) -> bool {
-    let mut ok = false;
-    FW.lock(|f| {
-        let mut s = f.borrow_mut();
-        if !s.active {
-            return;
-        }
-        s.active = false;
-
-        let tail = s.page_len as u32;
-        if s.failed || !page_flush(&mut s) {
-            dbg_store(&[
-                1,
-                s.written + tail,
-                0,
-                0,
-                0,
-                0,
-                0,
-                0,
-                0,
-                0,
-                0,
-                0,
-                0,
-                0,
-                0,
-                0,
-            ]);
-            return;
-        }
-        s.written += tail;
-        if s.written != s.total {
-            dbg_store(&[2, s.written, s.total, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]);
-            return;
-        }
-
-        let total = s.total;
-        let mut crc_v = 0u16;
-        let mut buf = [0u8; READ_CHUNK];
-        let mut verified = true;
-        let mut off = 0u32;
-        while off < total {
-            let n = (total - off).min(READ_CHUNK as u32) as usize;
-            let got = matches!(nor_with(|nor| nor.read(off, &mut buf[..n])), Some(Ok(())));
-            if !got {
-                verified = false;
-                break;
-            }
-            if off == 0 {
-                let mut d = [0u32; 16];
-                d[0] = 3;
-                d[1] = total;
-                for (i, w) in buf[..16].chunks(4).enumerate() {
-                    d[4 + i] = u32::from_le_bytes([w[0], w[1], w[2], w[3]]);
-                }
-                dbg_store(&d);
-            }
-            crc_v = upg::crc16_ccitt(crc_v, &buf[..n]);
-            off += n as u32;
-        }
-        if !verified {
-            dbg_store(&[4, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]);
-            return;
-        }
-        let tlv_ok = tlv_keyhash_ok();
-        // crc=None (CAN CONFIRM): skip the CRC compare — the MCUboot
-        // signature is the integrity gate
-        let crc_bad = match crc {
-            Some(expect) => crc_v != expect,
-            None => false,
+/// Drain the pending ring into the storage task. Returns false on any RPC /
+/// programming failure (the session is marked failed; further calls are
+/// harmless).
+pub async fn flush() -> bool {
+    loop {
+        let mut buf = [0u8; PAGE_SZ];
+        let item = RING.lock(|r| r.borrow_mut().pop_into(&mut buf));
+        let (off, len) = match item {
+            Some(v) => v,
+            None => return true,
         };
-        if crc_bad || !tlv_ok {
-            // full diagnostics: computed/expected crc + tail bytes
-            let mut tail16 = [0u8; 16];
-            let tail_off = total.saturating_sub(16);
-            let _ = nor_with(|nor| nor.read(tail_off, &mut tail16));
-            let mut d = [0u32; 16];
-            d[0] = 5;
-            d[1] = crc_v as u32;
-            d[2] = crc.unwrap_or(0) as u32;
-            d[3] = tlv_ok as u32;
-            for (i, w) in tail16.chunks(4).enumerate() {
-                d[8 + i] = u32::from_le_bytes([w[0], w[1], w[2], w[3]]);
-            }
-            dbg_store(&d);
-            return;
+        critical_section::with(|_cs| {
+            FW_STAGE.lock(|s| s.borrow_mut()[..len].copy_from_slice(&buf[..len]));
+        });
+        let seq = rpc_seq();
+        QUEUE.try_send(StorageCmd::FwProg { off, len: len as u16 }).ok();
+        if !rpc_wait(seq).await || !fw_res_ok() {
+            FW.lock(|f| f.borrow_mut().failed = true);
+            dbg_store(&[7, off, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]);
+            return false;
         }
-        ok = true;
-    });
-    ok
+    }
 }
 
-/// Read the image header from slot1, locate the TLV block, check its KEYHASH.
-fn tlv_keyhash_ok() -> bool {
-    let mut hdr = [0u8; 32];
-    if !matches!(nor_with(|nor| nor.read(0, &mut hdr)), Some(Ok(()))) {
+/// Flush pending pages, verify sizes, re-read the whole image from DFU and
+/// (when `crc` is given) compare the CRC16-CCITT of the readback, then mark
+/// the image for swap. Resets the session either way.
+pub async fn finish(crc: Option<u16>) -> bool {
+    if !flush().await {
         return false;
     }
-    let pos = match upg::image_tlv_pos(&hdr, IMG_HDR_SIZE) {
-        Some(p) => p,
-        None => return false,
-    };
-    if pos.tlv_off + 4 > upg::SLOT1_SIZE {
-        return false;
-    }
-    let mut tlv = [0u8; TLV_READ];
-    let read = (TLV_READ as u32).min(upg::SLOT1_SIZE - pos.tlv_off) as usize;
-    if !matches!(
-        nor_with(|nor| nor.read(pos.tlv_off, &mut tlv[..read])),
-        Some(Ok(()))
-    ) {
-        return false;
-    }
-    matches!(upg::keyhash_in_tlv(&tlv[..read]), Some(kh) if kh == &upg::FW_KEYHASH)
-}
 
-pub fn received() -> u32 {
-    FW.lock(|f| {
+    let (active, failed, total, received) = FW.lock(|f| {
         let s = f.borrow();
-        s.written + s.page_len as u32
-    })
+        (s.active, s.failed, s.total, s.received)
+    });
+    if !active {
+        return false;
+    }
+    // one-shot: take the session down before verifying
+    FW.lock(|f| {
+        let mut s = f.borrow_mut();
+        s.active = false;
+        s.page_len = 0;
+    });
+
+    if failed || received != total {
+        dbg_store(&[2, received, total, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]);
+        return false;
+    }
+
+    // Readback verify: hash the bytes AS STORED IN DFU, not the ones sent.
+    let mut crc_v: u16 = 0;
+    let mut verified = true;
+    let mut off: u32 = 0;
+    while off < total {
+        let n = (total - off).min(PAGE_SZ as u32) as usize;
+        let seq = rpc_seq();
+        QUEUE.try_send(StorageCmd::FwRead { off }).ok();
+        if !rpc_wait(seq).await || !fw_res_ok() {
+            verified = false;
+            break;
+        }
+        let chunk = critical_section::with(|_cs| FW_READ.lock(|r| *r.borrow()));
+        crc_v = upg::crc16_ccitt(crc_v, &chunk[..n]);
+        off += n as u32;
+    }
+    if !verified {
+        dbg_store(&[4, received, total, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]);
+        return false;
+    }
+
+    if matches!(crc, Some(expect) if crc_v != expect) {
+        dbg_store(&[
+            5, received, total, crc_v as u32, crc.unwrap_or(0) as u32, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+            0, 0,
+        ]);
+        return false;
+    }
+
+    let seq = rpc_seq();
+    QUEUE.try_send(StorageCmd::FwMarkUpdated).ok();
+    if !rpc_wait(seq).await || !fw_res_ok() {
+        dbg_store(&[8, received, total, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]);
+        return false;
+    }
+    true
+}
+
+/// Abandon the session (START always runs this implicitly via the busy gate;
+/// kept for explicit teardown paths).
+pub fn abort() {
+    FW.lock(|f| *f.borrow_mut() = Sess::new());
+    RING.lock(|r| r.borrow_mut().clear());
+}
+
+/// Bytes accepted so far (includes buffered/ringed bytes not yet flashed) —
+/// the offset the transport must send next.
+pub fn received() -> u32 {
+    FW.lock(|f| f.borrow().received)
 }
 
 pub fn total() -> u32 {
@@ -283,32 +309,4 @@ pub fn total() -> u32 {
 
 pub fn active() -> bool {
     FW.lock(|f| f.borrow().active)
-}
-
-// ---- MCUboot trailer (boot_set_pending) ----
-
-/// bootutil boot_set_next(slot1, active=false, confirm=permanent) on a
-/// freshly erased trailer: magic, then image_ok + swap_info (PERM/TEST).
-/// Offsets/flags are the bootutil_priv/bootutil_misc formulas for
-/// BOOT_MAX_ALIGN == 8; run after finish() so the region is still erased.
-pub fn boot_set_pending(permanent: bool) -> bool {
-    let ok = nor_with(|nor| {
-        nor.write(upg::magic_off(), &upg::BOOT_MAGIC)
-            .and_then(|_| {
-                if permanent {
-                    nor.write(upg::image_ok_off(), &upg::trailer_flag(upg::BOOT_FLAG_SET))
-                } else {
-                    Ok(())
-                }
-            })
-            .and_then(|_| {
-                let ty = if permanent {
-                    upg::BOOT_SWAP_TYPE_PERM
-                } else {
-                    upg::BOOT_SWAP_TYPE_TEST
-                };
-                nor.write(upg::swap_info_off(), &upg::trailer_flag(ty))
-            })
-    });
-    matches!(ok, Some(Ok(())))
 }

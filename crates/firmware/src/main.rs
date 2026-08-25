@@ -58,14 +58,13 @@ fn board_config() -> BoardConfig {
 
 #[embassy_executor::main]
 async fn main(spawner: Spawner) {
-    // boot_jump_vec() leaves PRIMASK set (__disable_irq before the jump) and
-    // cortex-m-rt never clears it. Before unmasking we must also kill any
-    // interrupts the bootloader left pending/enabled: its jump only clears
-    // NVIC ICPR[0], so a pending IRQ whose vector our table binds to
+    // The bootloader (embassy-boot) jumps with interrupts masked, but only
+    // clears NVIC ICPR[0]; before unmasking we must also kill any interrupts
+    // it left pending/enabled: a pending IRQ whose vector our table binds to
     // DefaultHandler (e.g. EXTI9_5 from DI pin activity) would trap the core
     // in the default handler loop the moment interrupts open.
     unsafe {
-        core::ptr::write_volatile(0xE000_ED08 as *mut u32, 0x0801_0200); // SCB.VTOR
+        core::ptr::write_volatile(0xE000_ED08 as *mut u32, 0x0802_0000); // SCB.VTOR = ACTIVE
         for i in 0..3usize {
             core::ptr::write_volatile((0xE000_E180 + 4 * i) as *mut u32, 0xFFFF_FFFF); // ICER: disable all
             core::ptr::write_volatile((0xE000_E280 + 4 * i) as *mut u32, 0xFFFF_FFFF);
@@ -391,6 +390,14 @@ async fn heartbeat(
         ticks = ticks.wrapping_add(1);
         if ticks == 1 {
             log::inf("hb: ticking");
+        }
+        // embassy-boot trial boot: ~10 s after boot, confirm the running
+        // image if the bootloader swapped it in (closes the revert window;
+        // a firmware that never gets here is rolled back on next reset)
+        if ticks == 100 {
+            crate::storage::QUEUE
+                .try_send(crate::storage::StorageCmd::FwMarkBooted)
+                .ok();
         }
 
         // delayed reboot poll (100ms granularity): web/UDP-triggered
