@@ -11,8 +11,8 @@
 
 use core::cell::RefCell;
 
-use embassy_sync::blocking_mutex::Mutex;
 use embassy_sync::blocking_mutex::raw::ThreadModeRawMutex;
+use embassy_sync::blocking_mutex::Mutex;
 
 const PATTERN: u32 = 0xA5A5_A5A5;
 
@@ -80,7 +80,12 @@ struct TaskStat {
 }
 
 static STATS: Mutex<ThreadModeRawMutex, RefCell<[TaskStat; TASK_NAMES.len()]>> =
-    Mutex::new(RefCell::new([TaskStat { min_sp: 0, loops: 0 }; TASK_NAMES.len()]));
+    Mutex::new(RefCell::new(
+        [TaskStat {
+            min_sp: 0,
+            loops: 0,
+        }; TASK_NAMES.len()],
+    ));
 
 /// Record the current MSP and one loop iteration for this task. Call from a
 /// task's main loop (and optionally its deep helpers); a handful of

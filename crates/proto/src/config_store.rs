@@ -136,7 +136,10 @@ pub struct ConfigState {
 /// Read both slots and pick the active one: higher generation wins, a valid
 /// slot beats an invalid one, both-invalid falls back to defaults.
 pub fn config_store_init(f: &mut dyn Flash) -> Result<ConfigState, ()> {
-    let mut state = ConfigState { cfg: IoCfg::defaults(), cur_slot: None };
+    let mut state = ConfigState {
+        cfg: IoCfg::defaults(),
+        cur_slot: None,
+    };
     let (a, b) = (slot_read(f, CFG_SLOT_A)?, slot_read(f, CFG_SLOT_B)?);
     match (a, b) {
         (SlotRead::Valid(ca, ga), SlotRead::Valid(cb, gb)) => {
@@ -198,7 +201,11 @@ pub fn config_store_save_gen(
     cur_slot: Option<u32>,
     cur_gen: u32,
 ) -> Result<u32, ()> {
-    let tgt = if cur_slot == Some(CFG_SLOT_A) { CFG_SLOT_B } else { CFG_SLOT_A };
+    let tgt = if cur_slot == Some(CFG_SLOT_A) {
+        CFG_SLOT_B
+    } else {
+        CFG_SLOT_A
+    };
     let rec = encode_record(cfg, cur_gen + 1);
     f.erase(tgt, CFG_SLOT_SIZE)?;
     f.write(tgt, &rec[..CFG_HDR_LEN])?;
@@ -226,7 +233,10 @@ mod tests {
 
     impl FakeFlash {
         fn new() -> Self {
-            Self { mem: vec![0xFF; 0x100000], torn_writes: false }
+            Self {
+                mem: vec![0xFF; 0x100000],
+                torn_writes: false,
+            }
         }
     }
 

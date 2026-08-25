@@ -1,0 +1,6 @@
+# all text files: LF in the repo AND in the working tree on every platform
+* text=auto eol=lf
+
+# binaries
+*.bin binary
+*.pem binary

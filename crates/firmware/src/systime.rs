@@ -8,14 +8,13 @@ use core::cell::RefCell;
 use core::sync::atomic::{AtomicU32, Ordering};
 
 use embassy_stm32::rtc::{DateTime, DayOfWeek, Rtc, RtcTimeProvider};
-use embassy_sync::blocking_mutex::Mutex;
 use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
+use embassy_sync::blocking_mutex::Mutex;
 
-use io_edge_hub_proto::time_math::{Civil, TS_DEFAULT, civil_to_unix, ts_valid, unix_to_civil};
+use io_edge_hub_proto::time_math::{civil_to_unix, ts_valid, unix_to_civil, Civil, TS_DEFAULT};
 
 static EPOCH: AtomicU32 = AtomicU32::new(TS_DEFAULT);
-static RTC: Mutex<CriticalSectionRawMutex, RefCell<Option<Rtc>>> =
-    Mutex::new(RefCell::new(None));
+static RTC: Mutex<CriticalSectionRawMutex, RefCell<Option<Rtc>>> = Mutex::new(RefCell::new(None));
 
 pub fn init(rtc: Rtc, provider: &RtcTimeProvider) {
     let epoch = match provider.now() {
@@ -50,8 +49,17 @@ pub fn set_timestamp(ts: u32) -> bool {
         return false;
     }
     let c = unix_to_civil(ts);
-    let dt = DateTime::from(c.year, c.month, c.day, DayOfWeek::Thursday, c.hour, c.min, c.sec, 0)
-        .expect("civil date in valid window");
+    let dt = DateTime::from(
+        c.year,
+        c.month,
+        c.day,
+        DayOfWeek::Thursday,
+        c.hour,
+        c.min,
+        c.sec,
+        0,
+    )
+    .expect("civil date in valid window");
     critical_section::with(|_cs| {
         RTC.lock(|c| {
             if let Some(rtc) = c.borrow_mut().as_mut() {

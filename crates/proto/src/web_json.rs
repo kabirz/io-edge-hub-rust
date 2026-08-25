@@ -120,7 +120,8 @@ pub fn history_web_name_valid(name: &[u8]) -> bool {
     if !name.starts_with(b"data_") {
         return false;
     }
-    name.iter().all(|&b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'_' | b'-'))
+    name.iter()
+        .all(|&b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'_' | b'-'))
 }
 
 #[cfg(test)]
@@ -130,7 +131,10 @@ mod tests {
     #[test]
     fn i32_extraction() {
         assert_eq!(json_get_i32(b"{\"index\":0,\"value\":1}", "index"), Some(0));
-        assert_eq!(json_get_i32(b"{\"index\":18,\"value\":1}", "value"), Some(1));
+        assert_eq!(
+            json_get_i32(b"{\"index\":18,\"value\":1}", "value"),
+            Some(1)
+        );
         assert_eq!(json_get_i32(b"{\"index\":-1}", "index"), Some(-1));
         assert_eq!(json_get_i32(b"{\"index\":\"x\"}", "index"), None);
         assert_eq!(json_get_i32(b"{\"value\":1}", "index"), None);
@@ -139,8 +143,14 @@ mod tests {
 
     #[test]
     fn str_extraction() {
-        assert_eq!(json_get_str(b"{\"ip\":\"192.168.12.101\"}", "ip"), Some(&b"192.168.12.101"[..]));
-        assert_eq!(json_get_str(b"{\"name\":\"data_1.raw\",\"x\":1}", "name"), Some(&b"data_1.raw"[..]));
+        assert_eq!(
+            json_get_str(b"{\"ip\":\"192.168.12.101\"}", "ip"),
+            Some(&b"192.168.12.101"[..])
+        );
+        assert_eq!(
+            json_get_str(b"{\"name\":\"data_1.raw\",\"x\":1}", "name"),
+            Some(&b"data_1.raw"[..])
+        );
         assert_eq!(json_get_str(b"{\"ip\":123}", "ip"), None);
     }
 

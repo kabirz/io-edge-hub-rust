@@ -70,7 +70,12 @@ pub fn init() {
         DMA2_ST2_M0AR.write_volatile(core::ptr::addr_of_mut!(RX_BUF) as u32);
         DMA2_ST2_NDTR.write_volatile(RX_RING as u32);
         DMA2_ST2_CR.write_volatile(
-            DMA_SxCR_CHSEL_4 | DMA_SxCR_MSIZ_8 | DMA_SxCR_PSIZ_8 | DMA_SxCR_MINC | DMA_SxCR_CIRC | DMA_SxCR_EN,
+            DMA_SxCR_CHSEL_4
+                | DMA_SxCR_MSIZ_8
+                | DMA_SxCR_PSIZ_8
+                | DMA_SxCR_MINC
+                | DMA_SxCR_CIRC
+                | DMA_SxCR_EN,
         );
     }
 }

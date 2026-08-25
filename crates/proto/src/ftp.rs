@@ -71,9 +71,12 @@ mod tests {
         assert_eq!(parse_port_arg("1"), None);
         assert_eq!(parse_port_arg(""), None);
         assert_eq!(parse_port_arg("1,2,3,4,5,6,7"), None); // was: collect overflow panic
-        // a single trailing comma is tolerated (empty part), matching the
-        // lenient C sscanf-style parsing
-        assert_eq!(parse_port_arg("1,2,3,4,5,6,"), parse_port_arg("1,2,3,4,5,6"));
+                                                           // a single trailing comma is tolerated (empty part), matching the
+                                                           // lenient C sscanf-style parsing
+        assert_eq!(
+            parse_port_arg("1,2,3,4,5,6,"),
+            parse_port_arg("1,2,3,4,5,6")
+        );
         assert_eq!(parse_port_arg("1,2,3,4,5,,6"), None); // empty part mid-list
     }
 

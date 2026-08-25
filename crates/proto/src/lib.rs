@@ -2,8 +2,8 @@
 
 pub mod adc_math;
 pub mod bytes;
-pub mod crc;
 pub mod config_store;
+pub mod crc;
 pub mod ftp;
 pub mod fw_upg;
 pub mod history;

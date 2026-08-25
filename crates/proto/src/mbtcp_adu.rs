@@ -5,7 +5,7 @@
 //! -> unit == 0 broadcast: side effects run, no reply, NO_RESP counted.
 
 use crate::bytes;
-use crate::mb_server::{MB_SERVER_PDU_MAX, MbDiag, MbServer};
+use crate::mb_server::{MbDiag, MbServer, MB_SERVER_PDU_MAX};
 use crate::regmap::{RegHooks, RegMap};
 
 pub const MB_EXC_SERVER_DEVICE_FAILURE: u8 = 0x04;
@@ -48,13 +48,22 @@ pub fn mbtcp_adu_process(
 
     // length clamp: MIN(mbap_len, 256) - 2 + 1 = PDU (fc + data) length
     let mbap_len = mbap_len.min(MBTCP_MBAP_LEN_CLAMP);
-    let mut pdu_len = if mbap_len >= 2 { (mbap_len - 2 + 1) as usize } else { 1 };
+    let mut pdu_len = if mbap_len >= 2 {
+        (mbap_len - 2 + 1) as usize
+    } else {
+        1
+    };
     // defensive: received bytes must cover the declared PDU
     if pdu_len > in_.len() - OFF_FC {
         pdu_len = in_.len() - OFF_FC;
     }
 
-    let rsp_len = srv.process(&in_[OFF_FC..OFF_FC + pdu_len], &mut out[OFF_FC..], regs, hooks);
+    let rsp_len = srv.process(
+        &in_[OFF_FC..OFF_FC + pdu_len],
+        &mut out[OFF_FC..],
+        regs,
+        hooks,
+    );
 
     if unit_id == 0 {
         // broadcast: side effects executed, no reply
@@ -88,7 +97,9 @@ mod tests {
         let mut h = NoHooks;
         let mut out = [0u8; MBTCP_ADU_TX_MAX];
         // MBAP tid=0x1234 proto=0 len=6 unit=1 + FC03 addr 0x0A qty 4
-        let req = [0x12, 0x34, 0x00, 0x00, 0x00, 0x06, 0x01, 0x03, 0x00, 0x0A, 0x00, 0x04];
+        let req = [
+            0x12, 0x34, 0x00, 0x00, 0x00, 0x06, 0x01, 0x03, 0x00, 0x0A, 0x00, 0x04,
+        ];
         let n = mbtcp_adu_process(&req, &mut out, &mut srv, &mut regs, &mut h);
         assert_eq!(n, 7 + 10); // MBAP + (fc + bytecount + 4 regs)
         assert_eq!(&out[0..2], &[0x12, 0x34]);
@@ -107,7 +118,9 @@ mod tests {
         let mut regs = RegMap::new(0x0300);
         let mut h = NoHooks;
         let mut out = [0u8; MBTCP_ADU_TX_MAX];
-        let req = [0x00, 0x01, 0x00, 0x01, 0x00, 0x06, 0x00, 0x03, 0x00, 0x00, 0x00, 0x01];
+        let req = [
+            0x00, 0x01, 0x00, 0x01, 0x00, 0x06, 0x00, 0x03, 0x00, 0x00, 0x00, 0x01,
+        ];
         let n = mbtcp_adu_process(&req, &mut out, &mut srv, &mut regs, &mut h);
         assert_eq!(n, 9);
         assert_eq!(out[7], 0x83);
@@ -122,7 +135,9 @@ mod tests {
         let mut h = NoHooks;
         let mut out = [0u8; MBTCP_ADU_TX_MAX];
         // unit=0 FC06 write DO=0x55
-        let req = [0x00, 0x00, 0x00, 0x00, 0x00, 0x06, 0x00, 0x06, 0x00, 0x00, 0x00, 0x55];
+        let req = [
+            0x00, 0x00, 0x00, 0x00, 0x00, 0x06, 0x00, 0x06, 0x00, 0x00, 0x00, 0x55,
+        ];
         let n = mbtcp_adu_process(&req, &mut out, &mut srv, &mut regs, &mut h);
         assert_eq!(n, 0);
         assert_eq!(regs.get_holding(0x00), 0x55); // side effect happened

@@ -2,8 +2,8 @@
 
 use core::cell::RefCell;
 
-use embassy_sync::blocking_mutex::Mutex;
 use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
+use embassy_sync::blocking_mutex::Mutex;
 
 use io_edge_hub_proto::mb_server::MbServer;
 use io_edge_hub_proto::regmap::{RegHooks, RegMap};
@@ -35,7 +35,11 @@ static REBOOT_AT: Mutex<CriticalSectionRawMutex, RefCell<Option<u64>>> =
     Mutex::new(RefCell::new(None));
 
 pub fn set_reboot_status(on: bool) {
-    let v = if on { Some(embassy_time::Instant::now().as_millis() as u64 + 250) } else { None };
+    let v = if on {
+        Some(embassy_time::Instant::now().as_millis() as u64 + 250)
+    } else {
+        None
+    };
     critical_section::with(|_cs| {
         REBOOT_AT.lock(|r| *r.borrow_mut() = v);
     });
@@ -96,7 +100,9 @@ impl RegHooks for Hooks {
     }
 
     fn history_sync(&mut self) {
-        crate::storage::QUEUE.try_send(crate::storage::StorageCmd::Sync).ok();
+        crate::storage::QUEUE
+            .try_send(crate::storage::StorageCmd::Sync)
+            .ok();
     }
 
     fn reboot_cold(&mut self) {

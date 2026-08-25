@@ -124,7 +124,12 @@ impl RegMap {
 
     /// Holding write with side effects (same semantics as FC06/FC16 writes).
     /// Same-value writes return early and skip ALL side effects.
-    pub fn io_write_holding(&mut self, addr: u16, reg: u16, hooks: &mut impl RegHooks) -> Result<(), ()> {
+    pub fn io_write_holding(
+        &mut self,
+        addr: u16,
+        reg: u16,
+        hooks: &mut impl RegHooks,
+    ) -> Result<(), ()> {
         let a = *self.holding.get(addr as usize).ok_or(())?;
         if a == reg {
             return Ok(());
@@ -155,7 +160,12 @@ impl RegMap {
     }
 
     /// Single DO bit write (RMW, FC05 semantics).
-    pub fn io_write_do_bit(&mut self, bit: u16, state: bool, hooks: &mut impl RegHooks) -> Result<(), ()> {
+    pub fn io_write_do_bit(
+        &mut self,
+        bit: u16,
+        state: bool,
+        hooks: &mut impl RegHooks,
+    ) -> Result<(), ()> {
         if bit as usize >= DO_NUM {
             return Err(());
         }
@@ -265,7 +275,8 @@ mod tests {
     fn do_write_drives_output() {
         let mut r = regs();
         let mut h = Mock::default();
-        r.io_write_holding(HOLDING_DO_IDX as u16, 0xA5, &mut h).unwrap();
+        r.io_write_holding(HOLDING_DO_IDX as u16, 0xA5, &mut h)
+            .unwrap();
         assert_eq!(*h.do_val.borrow(), 0xA5);
         assert_eq!(r.holding[HOLDING_DO_IDX], 0xA5);
     }
@@ -274,7 +285,8 @@ mod tests {
     fn same_value_write_skips_side_effects() {
         let mut r = regs();
         let mut h = Mock::default();
-        r.io_write_holding(HOLDING_CONFIG_SAVE_IDX as u16, 0, &mut h).unwrap();
+        r.io_write_holding(HOLDING_CONFIG_SAVE_IDX as u16, 0, &mut h)
+            .unwrap();
         assert_eq!(*h.saves.borrow(), 0);
     }
 
@@ -282,7 +294,8 @@ mod tests {
     fn config_save_zeros_and_saves() {
         let mut r = regs();
         let mut h = Mock::default();
-        r.io_write_holding(HOLDING_CONFIG_SAVE_IDX as u16, 1, &mut h).unwrap();
+        r.io_write_holding(HOLDING_CONFIG_SAVE_IDX as u16, 1, &mut h)
+            .unwrap();
         assert_eq!(*h.saves.borrow(), 1);
         assert_eq!(r.holding[HOLDING_CONFIG_SAVE_IDX], 0);
     }
@@ -291,7 +304,8 @@ mod tests {
     fn reboot_write_syncs_then_reboots() {
         let mut r = regs();
         let mut h = Mock::default();
-        r.io_write_holding(HOLDING_REBOOT_IDX as u16, 1, &mut h).unwrap();
+        r.io_write_holding(HOLDING_REBOOT_IDX as u16, 1, &mut h)
+            .unwrap();
         assert_eq!(*h.syncs.borrow(), 1);
         assert_eq!(*h.reboots.borrow(), 1);
         assert_eq!(r.holding[HOLDING_REBOOT_IDX], 0);
@@ -301,8 +315,10 @@ mod tests {
     fn timestamp_write_combines_hi_lo() {
         let mut r = regs();
         let mut h = Mock::default();
-        r.update_holding(HOLDING_TIMESTAMP_HI_IDX as u16, 0x6A9C).unwrap();
-        r.io_write_holding(HOLDING_TIMESTAMP_LO_IDX as u16, 0xB400, &mut h).unwrap();
+        r.update_holding(HOLDING_TIMESTAMP_HI_IDX as u16, 0x6A9C)
+            .unwrap();
+        r.io_write_holding(HOLDING_TIMESTAMP_LO_IDX as u16, 0xB400, &mut h)
+            .unwrap();
         assert_eq!(*h.ts.borrow(), Some(0x6A9CB400));
     }
 
@@ -311,15 +327,22 @@ mod tests {
         let mut r = regs();
         let mut h = Mock::default();
         h.epoch = 0x1234_5678;
-        assert_eq!(r.io_read_holding(HOLDING_TIMESTAMP_HI_IDX as u16, &h), 0x1234);
-        assert_eq!(r.io_read_holding(HOLDING_TIMESTAMP_LO_IDX as u16, &h), 0x5678);
+        assert_eq!(
+            r.io_read_holding(HOLDING_TIMESTAMP_HI_IDX as u16, &h),
+            0x1234
+        );
+        assert_eq!(
+            r.io_read_holding(HOLDING_TIMESTAMP_LO_IDX as u16, &h),
+            0x5678
+        );
     }
 
     #[test]
     fn do_bit_write_rmw() {
         let mut r = regs();
         let mut h = Mock::default();
-        r.io_write_holding(HOLDING_DO_IDX as u16, 0x00, &mut h).unwrap();
+        r.io_write_holding(HOLDING_DO_IDX as u16, 0x00, &mut h)
+            .unwrap();
         r.io_write_do_bit(3, true, &mut h).unwrap();
         assert_eq!(*h.do_val.borrow(), 0x08);
         assert!(r.io_coil_rd(3).unwrap());

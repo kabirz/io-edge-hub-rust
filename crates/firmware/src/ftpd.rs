@@ -104,7 +104,12 @@ async fn send_line(sock: &mut TcpSocket<'static>, msg: &str) {
     let _ = sock.flush().await;
 }
 
-async fn session(ctrl: &mut TcpSocket<'static>, data: &mut TcpSocket<'static>, stack: Stack<'static>, slot: u8) {
+async fn session(
+    ctrl: &mut TcpSocket<'static>,
+    data: &mut TcpSocket<'static>,
+    stack: Stack<'static>,
+    slot: u8,
+) {
     let mut s = Session {
         authed: false,
         anon: false,
@@ -135,10 +140,7 @@ async fn session(ctrl: &mut TcpSocket<'static>, data: &mut TcpSocket<'static>, s
                 // filter resetting on a malformed PORT before it reaches us
                 let mut m = heapless::String::<64>::new();
                 use core::fmt::Write as _;
-                let _ = core::fmt::write(
-                    &mut m,
-                    core::format_args!("ftp: ctrl read err {:?}", e),
-                );
+                let _ = core::fmt::write(&mut m, core::format_args!("ftp: ctrl read err {:?}", e));
                 crate::log::err(&m);
                 return;
             }
@@ -239,13 +241,19 @@ fn fmt_ls_time(name: &str) -> heapless::String<20> {
     // two(12) reads b[12..14], so the guard must cover 14 bytes — a 13-byte
     // "data_..." name used to slip past a >= 13 check and panic the slice
     if b.len() >= 14 && &b[..5] == b"data_" {
-        let two = |i: usize| -> Option<u32> {
-            core::str::from_utf8(&b[i..i + 2]).ok()?.parse().ok()
-        };
+        let two =
+            |i: usize| -> Option<u32> { core::str::from_utf8(&b[i..i + 2]).ok()?.parse().ok() };
         if let (Some(mon), Some(day), Some(h), Some(m)) = (two(5), two(7), two(10), two(12)) {
             if (1..=12).contains(&mon) && (1..=31).contains(&day) && h <= 23 && m <= 59 {
                 let mut t = heapless::String::new();
-                let _ = write!(t, "{} {:2} {:02}:{:02}", MONTHS[(mon - 1) as usize], day, h, m);
+                let _ = write!(
+                    t,
+                    "{} {:2} {:02}:{:02}",
+                    MONTHS[(mon - 1) as usize],
+                    day,
+                    h,
+                    m
+                );
                 return t;
             }
         }
@@ -373,8 +381,12 @@ async fn handle_command(
                 let _ = write!(
                     r,
                     "227 Entering Passive Mode ({},{},{},{},{},{})",
-                    ip[0], ip[1], ip[2], ip[3],
-                    (p >> 8) & 0xFF, p & 0xFF
+                    ip[0],
+                    ip[1],
+                    ip[2],
+                    ip[3],
+                    (p >> 8) & 0xFF,
+                    p & 0xFF
                 );
             } else {
                 let _ = write!(r, "229 Entering Extended Passive Mode (|||{}|)", p);
@@ -417,7 +429,11 @@ async fn handle_command(
                 (false, false, 0)
             };
             let msg = if cmd == "DELE" {
-                if ok { "250 Delete OK" } else { "550 Delete failed" }
+                if ok {
+                    "250 Delete OK"
+                } else {
+                    "550 Delete failed"
+                }
             } else if ok {
                 "250 Remove OK"
             } else {
@@ -488,7 +504,15 @@ async fn handle_command(
                 ok = r;
             }
             s.rename_pending = false;
-            send_line(ctrl, if ok { "250 Rename successful" } else { "550 Rename failed" }).await;
+            send_line(
+                ctrl,
+                if ok {
+                    "250 Rename successful"
+                } else {
+                    "550 Rename failed"
+                },
+            )
+            .await;
         }
         "QUIT" => {
             send_line(ctrl, "221 Goodbye").await;
@@ -531,7 +555,13 @@ fn parse_eprt_arg(arg: &str) -> Option<IpEndpoint> {
     })
 }
 
-async fn cmd_list(ctrl: &mut TcpSocket<'static>, data: &mut TcpSocket<'static>, s: &mut Session, arg: &str, long: bool) {
+async fn cmd_list(
+    ctrl: &mut TcpSocket<'static>,
+    data: &mut TcpSocket<'static>,
+    s: &mut Session,
+    arg: &str,
+    long: bool,
+) {
     // strip typical "LIST -a" style switches
     let mut path_arg = arg;
     if let Some(rest) = arg.strip_prefix("- ") {
@@ -591,14 +621,23 @@ async fn cmd_list(ctrl: &mut TcpSocket<'static>, data: &mut TcpSocket<'static>, 
     send_line(ctrl, "226 Directory send OK").await;
 }
 
-async fn cmd_retr(ctrl: &mut TcpSocket<'static>, data: &mut TcpSocket<'static>, s: &mut Session, arg: &str) {
+async fn cmd_retr(
+    ctrl: &mut TcpSocket<'static>,
+    data: &mut TcpSocket<'static>,
+    s: &mut Session,
+    arg: &str,
+) {
     if !s.authed {
         send_line(ctrl, "530 Not logged in").await;
         return;
     }
     let fp = norm_path(&s.cwd, arg);
     let rest = s.rest;
-    let seq = rpc_send(StorageCmd::FtpOpenRead { slot: s.slot, path: ftp_path_bytes(&fp), rest });
+    let seq = rpc_send(StorageCmd::FtpOpenRead {
+        slot: s.slot,
+        path: ftp_path_bytes(&fp),
+        rest,
+    });
     let ok = rpc_wait(seq).await && ftp_res().0;
     let size = critical_section::with(|_cs| {
         crate::storage::FTP_XFER[s.slot as usize].lock(|x| {
@@ -675,7 +714,13 @@ async fn cmd_retr(ctrl: &mut TcpSocket<'static>, data: &mut TcpSocket<'static>, 
     }
 }
 
-async fn cmd_stor(ctrl: &mut TcpSocket<'static>, data: &mut TcpSocket<'static>, s: &mut Session, arg: &str, is_appe: bool) {
+async fn cmd_stor(
+    ctrl: &mut TcpSocket<'static>,
+    data: &mut TcpSocket<'static>,
+    s: &mut Session,
+    arg: &str,
+    is_appe: bool,
+) {
     if !s.authed || s.anon {
         send_line(ctrl, "530 Permission denied").await;
         return;
@@ -688,7 +733,11 @@ async fn cmd_stor(ctrl: &mut TcpSocket<'static>, data: &mut TcpSocket<'static>, 
     } else {
         FtpWrMode::Trunc
     };
-    let seq = rpc_send(StorageCmd::FtpOpenWrite { slot: s.slot, path: ftp_path_bytes(&fp), mode });
+    let seq = rpc_send(StorageCmd::FtpOpenWrite {
+        slot: s.slot,
+        path: ftp_path_bytes(&fp),
+        mode,
+    });
     let ok = rpc_wait(seq).await && ftp_res().0;
     s.rest = 0;
     if !ok {
@@ -713,7 +762,11 @@ async fn cmd_stor(ctrl: &mut TcpSocket<'static>, data: &mut TcpSocket<'static>, 
         // ASCII: strip \r of \r\n pairs, hold a trailing \r for the next chunk
         let wlen = if s.type_ascii {
             let mut o = 0usize;
-            let start = if pending_cr && n > 0 && buf[0] == b'\n' { 1 } else { 0 };
+            let start = if pending_cr && n > 0 && buf[0] == b'\n' {
+                1
+            } else {
+                0
+            };
             pending_cr = false;
             let mut i = start;
             while i < n {
@@ -740,7 +793,10 @@ async fn cmd_stor(ctrl: &mut TcpSocket<'static>, data: &mut TcpSocket<'static>, 
                     g.chunk[..wlen].copy_from_slice(&buf[..wlen]);
                 })
             });
-            let seq = rpc_send(StorageCmd::FtpWriteChunk { slot: s.slot, len: wlen });
+            let seq = rpc_send(StorageCmd::FtpWriteChunk {
+                slot: s.slot,
+                len: wlen,
+            });
             if !rpc_wait(seq).await {
                 xfer_err = true; // storage task wedged mid-transfer
                 break;

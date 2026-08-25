@@ -12,13 +12,25 @@ fn main() {
     // fold linker-script sizes into a generated constant: editing
     // memory.x/ccram.x then changes fw_version.rs, forcing a relink (cargo
     // does not track -T scripts and a stale link is a silent boot killer)
-    let memx = std::fs::read_to_string(PathBuf::from(&manifest).join("memory.x")).unwrap_or_default();
-    let ccmx = std::fs::read_to_string(PathBuf::from(&manifest).join("ccram.x")).unwrap_or_default();
+    let memx =
+        std::fs::read_to_string(PathBuf::from(&manifest).join("memory.x")).unwrap_or_default();
+    let ccmx =
+        std::fs::read_to_string(PathBuf::from(&manifest).join("ccram.x")).unwrap_or_default();
 
     // fw version string: "vM.m.p_<git6>" (same format as the C build, tools/gen_version)
-    let root = PathBuf::from(&manifest).parent().unwrap().parent().unwrap().to_path_buf();
-    let ver_raw = std::fs::read_to_string(root.join("VERSION")).unwrap_or_else(|_| "0.0.0 dev\n".into());
-    let ver: String = ver_raw.split_whitespace().next().unwrap_or("0.0.0").to_string();
+    let root = PathBuf::from(&manifest)
+        .parent()
+        .unwrap()
+        .parent()
+        .unwrap()
+        .to_path_buf();
+    let ver_raw =
+        std::fs::read_to_string(root.join("VERSION")).unwrap_or_else(|_| "0.0.0 dev\n".into());
+    let ver: String = ver_raw
+        .split_whitespace()
+        .next()
+        .unwrap_or("0.0.0")
+        .to_string();
     let git = Command::new("git")
         .arg("rev-parse")
         .arg("--short=6")
@@ -31,8 +43,11 @@ fn main() {
     };
     let fw_version = format!("v{ver}_{git}");
     let build_stamp = "Aug 23 2026 00:00:00"; // __DATE__ __TIME__ equivalent
-    // single-digit components for the Modbus version register (maj<<12|min<<8|patch)
-    let parts: Vec<u32> = ver.split('.').map(|p| p.parse::<u32>().unwrap_or(0)).collect();
+                                              // single-digit components for the Modbus version register (maj<<12|min<<8|patch)
+    let parts: Vec<u32> = ver
+        .split('.')
+        .map(|p| p.parse::<u32>().unwrap_or(0))
+        .collect();
     let (maj, min, pat) = (
         *parts.first().unwrap_or(&0),
         *parts.get(1).unwrap_or(&0),
@@ -54,11 +69,17 @@ fn main() {
     )
     .unwrap();
     println!("cargo:rerun-if-changed={}", root.join("VERSION").display());
-    println!("cargo:rerun-if-changed={}", root.join(".git").join("HEAD").display());
+    println!(
+        "cargo:rerun-if-changed={}",
+        root.join(".git").join("HEAD").display()
+    );
     // .git/HEAD content does not change on a commit (it stays "ref:
     // refs/heads/main"); the branch ref file does — watch the whole refs
     // dir so a fresh commit refreshes the hash baked into fw_version.rs
-    println!("cargo:rerun-if-changed={}", root.join(".git").join("refs").display());
+    println!(
+        "cargo:rerun-if-changed={}",
+        root.join(".git").join("refs").display()
+    );
     println!("cargo:rerun-if-env-changed=FW_GIT_DIR");
 
     // gzip the SPA into a byte asset (CMake's web_index_gz.h equivalent)
@@ -67,5 +88,8 @@ fn main() {
     std::io::Write::write_all(&mut gz, &index).unwrap();
     let gz = gz.finish().unwrap();
     std::fs::write(out.join("index_html.gz"), gz).unwrap();
-    println!("cargo:rerun-if-changed={}", root.join("assets").join("index.html").display());
+    println!(
+        "cargo:rerun-if-changed={}",
+        root.join("assets").join("index.html").display()
+    );
 }

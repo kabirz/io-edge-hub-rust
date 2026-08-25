@@ -11,7 +11,7 @@
 
 use io_edge_hub_proto::regmap as rm;
 
-use crate::appstate::{Hooks, REGS, version};
+use crate::appstate::{version, Hooks, REGS};
 use crate::{log, systime, uart_raw};
 
 const LINE_MAX: usize = 96; // includes NUL, like SH_LINE_MAX
@@ -26,8 +26,8 @@ pub static RX_GOT: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32
 /// latency — the DMA has already captured the bytes).
 async fn getchar() -> u8 {
     loop {
-        let tail = (RX_COUNT.load(core::sync::atomic::Ordering::Relaxed) as usize)
-            % uart_raw::RX_RING;
+        let tail =
+            (RX_COUNT.load(core::sync::atomic::Ordering::Relaxed) as usize) % uart_raw::RX_RING;
         if uart_raw::rx_available(tail) > 0 {
             RX_COUNT.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
             return uart_raw::rx_peek(tail);
@@ -51,10 +51,7 @@ fn redraw(line: &[u8], n: usize, pos: usize) {
     m += 3;
     if pos < n {
         let mut s = heapless::String::<12>::new();
-        let _ = core::fmt::write(
-            &mut s,
-            core::format_args!("\x1b[{}D", n - pos),
-        );
+        let _ = core::fmt::write(&mut s, core::format_args!("\x1b[{}D", n - pos));
         buf[m..m + s.len()].copy_from_slice(s.as_bytes());
         m += s.len();
     }
@@ -71,7 +68,11 @@ struct Hist {
 
 impl Hist {
     fn new() -> Self {
-        Self { lines: [[0; LINE_MAX]; HIST_MAX], len: 0, newest: 0 }
+        Self {
+            lines: [[0; LINE_MAX]; HIST_MAX],
+            len: 0,
+            newest: 0,
+        }
     }
 
     fn store(&mut self, line: &[u8]) {
@@ -109,34 +110,97 @@ struct Cmd {
 }
 const LEAF: &[Cmd] = &[];
 
-const IO_DO_CMDS: &[Cmd] = &[Cmd { name: "set", sub: LEAF }];
+const IO_DO_CMDS: &[Cmd] = &[Cmd {
+    name: "set",
+    sub: LEAF,
+}];
 const IO_RS485_CMDS: &[Cmd] = &[
-    Cmd { name: "baud", sub: LEAF },
-    Cmd { name: "sid", sub: LEAF },
+    Cmd {
+        name: "baud",
+        sub: LEAF,
+    },
+    Cmd {
+        name: "sid",
+        sub: LEAF,
+    },
 ];
 const IO_CAN_CMDS: &[Cmd] = &[
-    Cmd { name: "id", sub: LEAF },
-    Cmd { name: "bps", sub: LEAF },
+    Cmd {
+        name: "id",
+        sub: LEAF,
+    },
+    Cmd {
+        name: "bps",
+        sub: LEAF,
+    },
 ];
 const IO_CMDS: &[Cmd] = &[
-    Cmd { name: "help", sub: LEAF },
-    Cmd { name: "info", sub: LEAF },
-    Cmd { name: "di", sub: LEAF },
-    Cmd { name: "do", sub: IO_DO_CMDS },
-    Cmd { name: "ai", sub: LEAF },
-    Cmd { name: "rs485", sub: IO_RS485_CMDS },
-    Cmd { name: "can", sub: IO_CAN_CMDS },
-    Cmd { name: "ip", sub: LEAF },
-    Cmd { name: "reg", sub: LEAF },
-    Cmd { name: "save", sub: LEAF },
-    Cmd { name: "factory", sub: LEAF },
+    Cmd {
+        name: "help",
+        sub: LEAF,
+    },
+    Cmd {
+        name: "info",
+        sub: LEAF,
+    },
+    Cmd {
+        name: "di",
+        sub: LEAF,
+    },
+    Cmd {
+        name: "do",
+        sub: IO_DO_CMDS,
+    },
+    Cmd {
+        name: "ai",
+        sub: LEAF,
+    },
+    Cmd {
+        name: "rs485",
+        sub: IO_RS485_CMDS,
+    },
+    Cmd {
+        name: "can",
+        sub: IO_CAN_CMDS,
+    },
+    Cmd {
+        name: "ip",
+        sub: LEAF,
+    },
+    Cmd {
+        name: "reg",
+        sub: LEAF,
+    },
+    Cmd {
+        name: "save",
+        sub: LEAF,
+    },
+    Cmd {
+        name: "factory",
+        sub: LEAF,
+    },
 ];
 const ROOT_CMDS: &[Cmd] = &[
-    Cmd { name: "help", sub: LEAF },
-    Cmd { name: "tasks", sub: LEAF },
-    Cmd { name: "ps", sub: LEAF },
-    Cmd { name: "reboot", sub: LEAF },
-    Cmd { name: "io", sub: IO_CMDS },
+    Cmd {
+        name: "help",
+        sub: LEAF,
+    },
+    Cmd {
+        name: "tasks",
+        sub: LEAF,
+    },
+    Cmd {
+        name: "ps",
+        sub: LEAF,
+    },
+    Cmd {
+        name: "reboot",
+        sub: LEAF,
+    },
+    Cmd {
+        name: "io",
+        sub: IO_CMDS,
+    },
 ];
 
 /// Walk the command tree over the typed complete words; returns the
@@ -178,7 +242,10 @@ fn complete_level(line: &[u8], n: usize) -> (Option<&'static [Cmd]>, usize, usiz
 }
 
 fn complete(line: &mut [u8; LINE_MAX], n: &mut usize) {
-    static PLACEHOLDER: Cmd = Cmd { name: "", sub: LEAF };
+    static PLACEHOLDER: Cmd = Cmd {
+        name: "",
+        sub: LEAF,
+    };
     let (tbl, wstart, wlen0) = complete_level(line, *n);
     let Some(tbl) = tbl else { return };
     let mut wlen = wlen0;
@@ -215,10 +282,7 @@ fn complete(line: &mut [u8; LINE_MAX], n: &mut usize) {
     let mut lcp = cand[0].name.len();
     for c in cand[..ncand].iter().skip(1) {
         let mut j = 0;
-        while j < lcp
-            && j < c.name.len()
-            && cand[0].name.as_bytes()[j] == c.name.as_bytes()[j]
-        {
+        while j < lcp && j < c.name.len() && cand[0].name.as_bytes()[j] == c.name.as_bytes()[j] {
             j += 1;
         }
         lcp = j;
@@ -233,7 +297,10 @@ fn complete(line: &mut [u8; LINE_MAX], n: &mut usize) {
     log::raw(b"\r\n");
     let mut row = heapless::String::<128>::new();
     for (i, c) in cand[..ncand].iter().enumerate() {
-        let _ = core::fmt::write(&mut row, core::format_args!("{}{}", if i > 0 { "  " } else { "" }, c.name));
+        let _ = core::fmt::write(
+            &mut row,
+            core::format_args!("{}{}", if i > 0 { "  " } else { "" }, c.name),
+        );
     }
     log::line(&row);
     prompt();
@@ -277,7 +344,10 @@ fn cmd_help() {
 fn fmt_cnt(n: u32) -> heapless::String<8> {
     let mut s = heapless::String::new();
     if n >= 1_000_000 {
-        let _ = core::fmt::write(&mut s, core::format_args!("{}.{}M", n / 1_000_000, n / 100_000 % 10));
+        let _ = core::fmt::write(
+            &mut s,
+            core::format_args!("{}.{}M", n / 1_000_000, n / 100_000 % 10),
+        );
     } else if n >= 10_000 {
         let _ = core::fmt::write(&mut s, core::format_args!("{}K", n / 1000));
     } else {
@@ -314,7 +384,10 @@ fn cmd_tasks() {
     let mut s = heapless::String::<64>::new();
     let _ = core::fmt::write(
         &mut s,
-        core::format_args!("{} tasks, 1 async executor (cooperative)", crate::stackmark::TASK_NAMES.len()),
+        core::format_args!(
+            "{} tasks, 1 async executor (cooperative)",
+            crate::stackmark::TASK_NAMES.len()
+        ),
     );
     log::line(&s);
     let mut s = heapless::String::<64>::new();
@@ -368,7 +441,12 @@ fn cmd_io_info() {
         &mut s,
         core::format_args!(
             "mac     : {:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x}",
-            mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]
+            mac[0],
+            mac[1],
+            mac[2],
+            mac[3],
+            mac[4],
+            mac[5]
         ),
     );
     log::line(&s);
@@ -387,7 +465,14 @@ fn cmd_io_info() {
     let mut s = heapless::String::<24>::new();
     let _ = core::fmt::write(
         &mut s,
-        core::format_args!("link    : {}", if crate::net::net_link_up() { "up" } else { "down" }),
+        core::format_args!(
+            "link    : {}",
+            if crate::net::net_link_up() {
+                "up"
+            } else {
+                "down"
+            }
+        ),
     );
     log::line(&s);
     let mut s = heapless::String::<48>::new();
@@ -462,7 +547,10 @@ fn cmd_io_di() {
     let di = i.get(rm::INPUT_DI_IDX).copied().unwrap_or(0);
     let en = h.get(rm::HOLDING_DI_ENABLE_IDX).copied().unwrap_or(0);
     let mut s = heapless::String::<48>::new();
-    let _ = core::fmt::write(&mut s, core::format_args!("DI: 0x{:04x} (enable: 0x{:04x})", di, en));
+    let _ = core::fmt::write(
+        &mut s,
+        core::format_args!("DI: 0x{:04x} (enable: 0x{:04x})", di, en),
+    );
     log::line(&s);
     let mut row = 0;
     while row < 16 {
@@ -560,7 +648,10 @@ fn cmd_io_ai() {
     let mut s = heapless::String::<32>::new();
     let _ = core::fmt::write(
         &mut s,
-        core::format_args!("AI enable: 0x{:1x}", h.get(rm::HOLDING_AI_ENABLE_IDX).copied().unwrap_or(0) & 0x0F),
+        core::format_args!(
+            "AI enable: 0x{:1x}",
+            h.get(rm::HOLDING_AI_ENABLE_IDX).copied().unwrap_or(0) & 0x0F
+        ),
     );
     log::line(&s);
     for k in 0..4 {
@@ -568,7 +659,14 @@ fn cmd_io_ai() {
         let mut s = heapless::String::<48>::new();
         let _ = core::fmt::write(
             &mut s,
-            core::format_args!("AI{}: {:5}.{:02} {} (raw {})", k + 1, raw / 100, raw % 100, units[k], raw),
+            core::format_args!(
+                "AI{}: {:5}.{:02} {} (raw {})",
+                k + 1,
+                raw / 100,
+                raw % 100,
+                units[k],
+                raw
+            ),
         );
         log::line(&s);
     }
@@ -580,7 +678,10 @@ fn cmd_io_reg(args: &[&str]) {
         let mut s = heapless::String::<64>::new();
         let _ = core::fmt::write(
             &mut s,
-            core::format_args!("holding registers ({}):", rm::MODBUS_HOLDING_REGISTER_NUMBERS),
+            core::format_args!(
+                "holding registers ({}):",
+                rm::MODBUS_HOLDING_REGISTER_NUMBERS
+            ),
         );
         log::line(&s);
         let mut c = 0usize;
@@ -589,7 +690,12 @@ fn cmd_io_reg(args: &[&str]) {
             for j in c..(c + 6).min(rm::MODBUS_HOLDING_REGISTER_NUMBERS) {
                 let _ = core::fmt::write(
                     &mut s,
-                    core::format_args!("{}0x{:02x}={}", if j % 6 > 0 { " " } else { "" }, j, h.get(j).copied().unwrap_or(0)),
+                    core::format_args!(
+                        "{}0x{:02x}={}",
+                        if j % 6 > 0 { " " } else { "" },
+                        j,
+                        h.get(j).copied().unwrap_or(0)
+                    ),
                 );
             }
             log::line(&s);
@@ -607,7 +713,12 @@ fn cmd_io_reg(args: &[&str]) {
             for j in c..(c + 6).min(rm::MODBUS_INPUT_REGISTER_NUMBERS) {
                 let _ = core::fmt::write(
                     &mut s,
-                    core::format_args!("{}0x{:02x}={}", if j % 6 > 0 { " " } else { "" }, j, i.get(j).copied().unwrap_or(0)),
+                    core::format_args!(
+                        "{}0x{:02x}={}",
+                        if j % 6 > 0 { " " } else { "" },
+                        j,
+                        i.get(j).copied().unwrap_or(0)
+                    ),
                 );
             }
             log::line(&s);
@@ -627,7 +738,11 @@ fn cmd_io_reg(args: &[&str]) {
         let mut s = heapless::String::<48>::new();
         let _ = core::fmt::write(
             &mut s,
-            core::format_args!("holding[0x{:02x}] = {}", addr, h.get(addr as usize).copied().unwrap_or(0)),
+            core::format_args!(
+                "holding[0x{:02x}] = {}",
+                addr,
+                h.get(addr as usize).copied().unwrap_or(0)
+            ),
         );
         log::line(&s);
         return;
@@ -648,7 +763,11 @@ fn cmd_io_reg(args: &[&str]) {
     let mut s = heapless::String::<48>::new();
     let _ = core::fmt::write(
         &mut s,
-        core::format_args!("holding[0x{:02x}] = {}", addr, h.get(addr as usize).copied().unwrap_or(0)),
+        core::format_args!(
+            "holding[0x{:02x}] = {}",
+            addr,
+            h.get(addr as usize).copied().unwrap_or(0)
+        ),
     );
     log::line(&s);
 }
@@ -833,7 +952,13 @@ fn io_dispatch(args: &[&str]) {
             let mut s = heapless::String::<64>::new();
             let _ = core::fmt::write(
                 &mut s,
-                core::format_args!("ip -> {}.{}.{}.{} (saved, reboot to apply)", ip[0], ip[1], ip[2], ip[3]),
+                core::format_args!(
+                    "ip -> {}.{}.{}.{} (saved, reboot to apply)",
+                    ip[0],
+                    ip[1],
+                    ip[2],
+                    ip[3]
+                ),
             );
             log::line(&s);
         }

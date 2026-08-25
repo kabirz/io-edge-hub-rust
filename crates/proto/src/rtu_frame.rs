@@ -3,7 +3,7 @@
 //! does frame assembly, CRC check, unicast filter, decode and reply assembly.
 
 use crate::crc::crc16_modbus;
-use crate::mb_server::{MB_SERVER_PDU_MAX, MbDiag, MbServer};
+use crate::mb_server::{MbDiag, MbServer, MB_SERVER_PDU_MAX};
 use crate::regmap::{RegHooks, RegMap};
 
 pub const RTU_FRAME_MAX: usize = 256;
@@ -154,7 +154,9 @@ mod tests {
 
         let f = frame(1, &[0x03, 0x00, 0x0A, 0x00, 0x04]);
         rtu.rx_feed(&f);
-        let n = rtu.t35_expired(&mut srv, &mut regs, &mut h, &mut tx).unwrap();
+        let n = rtu
+            .t35_expired(&mut srv, &mut regs, &mut h, &mut tx)
+            .unwrap();
         assert_eq!(tx[0], 1);
         assert_eq!(tx[1], 3);
         // reply CRC valid
@@ -172,7 +174,9 @@ mod tests {
         let mut tx = [0u8; 1 + MB_SERVER_PDU_MAX + 2];
         let f = frame(0, &[0x06, 0x00, 0x00, 0x00, 0x77]);
         rtu.rx_feed(&f);
-        assert!(rtu.t35_expired(&mut srv, &mut regs, &mut h, &mut tx).is_none());
+        assert!(rtu
+            .t35_expired(&mut srv, &mut regs, &mut h, &mut tx)
+            .is_none());
         assert_eq!(regs.get_holding(0x00), 0x77);
         assert_eq!(srv.diag_get(MbDiag::NoResp), 1);
     }
@@ -188,7 +192,9 @@ mod tests {
         let mut f = frame(1, &[0x03, 0x00, 0x00, 0x00, 0x01]);
         f[3] ^= 0xFF; // corrupt
         rtu.rx_feed(&f);
-        assert!(rtu.t35_expired(&mut srv, &mut regs, &mut h, &mut tx).is_none());
+        assert!(rtu
+            .t35_expired(&mut srv, &mut regs, &mut h, &mut tx)
+            .is_none());
         assert_eq!(srv.diag_get(MbDiag::CrcErr), 1);
         assert_eq!(srv.diag_get(MbDiag::BusMsg), 1);
     }
@@ -203,7 +209,9 @@ mod tests {
         let mut tx = [0u8; 1 + MB_SERVER_PDU_MAX + 2];
         let f = frame(5, &[0x03, 0x00, 0x00, 0x00, 0x01]);
         rtu.rx_feed(&f);
-        assert!(rtu.t35_expired(&mut srv, &mut regs, &mut h, &mut tx).is_none());
+        assert!(rtu
+            .t35_expired(&mut srv, &mut regs, &mut h, &mut tx)
+            .is_none());
         assert_eq!(srv.diag_get(MbDiag::BusMsg), 1);
     }
 
@@ -216,10 +224,14 @@ mod tests {
         let mut h = NoHooks;
         let mut tx = [0u8; 1 + MB_SERVER_PDU_MAX + 2];
         rtu.rx_feed(&[0x01, 0x03]); // len < 4
-        assert!(rtu.t35_expired(&mut srv, &mut regs, &mut h, &mut tx).is_none());
+        assert!(rtu
+            .t35_expired(&mut srv, &mut regs, &mut h, &mut tx)
+            .is_none());
         // overflow: feed > 256 bytes
         rtu.rx_feed(&[0u8; 300]);
-        assert!(rtu.t35_expired(&mut srv, &mut regs, &mut h, &mut tx).is_none());
+        assert!(rtu
+            .t35_expired(&mut srv, &mut regs, &mut h, &mut tx)
+            .is_none());
         assert_eq!(srv.diag_get(MbDiag::NoResp), 2);
     }
 

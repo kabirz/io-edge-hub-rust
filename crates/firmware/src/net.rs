@@ -1,12 +1,9 @@
 //! W5500 MACRAW + embassy-net bring-up and the UDP :8600 config server.
 
+use core::cell::RefCell;
 use embassy_net::udp::{PacketMetadata, UdpSocket};
 use embassy_net::{IpAddress, IpEndpoint, Ipv4Address, Stack, StaticConfigV4};
-use core::cell::RefCell;
 
-use embassy_stm32::Peri;
-use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
-use embassy_sync::blocking_mutex::Mutex;
 use embassy_stm32::bind_interrupts;
 use embassy_stm32::dma;
 use embassy_stm32::exti::{ExtiInput, InterruptHandler as ExtiIrqHandler};
@@ -15,16 +12,19 @@ use embassy_stm32::mode::Async;
 use embassy_stm32::peripherals;
 use embassy_stm32::spi::{self, Spi};
 use embassy_stm32::time::Hertz;
+use embassy_stm32::Peri;
+use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
 use embassy_sync::blocking_mutex::raw::NoopRawMutex;
+use embassy_sync::blocking_mutex::Mutex;
 use embassy_sync::mutex::Mutex as AsyncMutex;
 use static_cell::StaticCell;
 
 use io_edge_hub_proto::regmap::HOLDING_IP_OCTET1_IDX;
 use io_edge_hub_proto::udp_cfg::{
-    UDP_CFG_BCAST_PORT, UDP_CFG_PORT, UdpVersion, udp_app_cmd, udp_cmd_bcast_allowed,
+    udp_app_cmd, udp_cmd_bcast_allowed, UdpVersion, UDP_CFG_BCAST_PORT, UDP_CFG_PORT,
 };
 
-use crate::appstate::{Cfg, Hooks, UDP_STATE, REGS, version};
+use crate::appstate::{version, Cfg, Hooks, REGS, UDP_STATE};
 
 use embassy_stm32::interrupt::typelevel::EXTI1 as EXTI1Irq;
 
@@ -37,11 +37,20 @@ bind_interrupts! {
 }
 
 type SpiBus = Spi<'static, Async, spi::mode::Master>;
-type W5500SpiDevice<'a> =
-    embassy_embedded_hal::shared_bus::asynch::spi::SpiDevice<'a, NoopRawMutex, SpiBus, Output<'static>>;
+type W5500SpiDevice<'a> = embassy_embedded_hal::shared_bus::asynch::spi::SpiDevice<
+    'a,
+    NoopRawMutex,
+    SpiBus,
+    Output<'static>,
+>;
 type W5500Int = ExtiInput<'static, Async>;
-type W5500Runner<'a> =
-    embassy_net_wiznet::Runner<'a, embassy_net_wiznet::chip::W5500, W5500SpiDevice<'a>, W5500Int, Output<'static>>;
+type W5500Runner<'a> = embassy_net_wiznet::Runner<
+    'a,
+    embassy_net_wiznet::chip::W5500,
+    W5500SpiDevice<'a>,
+    W5500Int,
+    Output<'static>,
+>;
 
 /// UID-derived MAC: Wiznet OUI + XOR-fold of the 96-bit device UID.
 pub fn derive_mac_from_uid() -> [u8; 6] {
@@ -61,17 +70,18 @@ pub static CUR_MAC: Mutex<CriticalSectionRawMutex, RefCell<[u8; 6]>> =
     Mutex::new(RefCell::new([0; 6]));
 
 pub fn current_mac() -> [u8; 6] {
-    critical_section::with(|_cs| CUR_MAC.lock(|m| {
-        let g = m.borrow();
-        let v: [u8; 6] = *g;
-        v
-    }))
+    critical_section::with(|_cs| {
+        CUR_MAC.lock(|m| {
+            let g = m.borrow();
+            let v: [u8; 6] = *g;
+            v
+        })
+    })
 }
 
 /// Link status refreshed by the heartbeat netmon poll (link-up boolean only;
 /// Stack itself is not Sync so it cannot live in a static).
-pub static LINK_UP: Mutex<CriticalSectionRawMutex, RefCell<bool>> =
-    Mutex::new(RefCell::new(false));
+pub static LINK_UP: Mutex<CriticalSectionRawMutex, RefCell<bool>> = Mutex::new(RefCell::new(false));
 
 pub fn net_link_up() -> bool {
     critical_section::with(|_cs| LINK_UP.lock(|b| *b.borrow()))
@@ -92,9 +102,16 @@ pub struct NetPins {
 pub async fn setup(spawner: &embassy_executor::Spawner, p: NetPins) -> &'static Stack<'static> {
     let mut spi_cfg = spi::Config::default();
     spi_cfg.frequency = Hertz(21_000_000);
-    let spi = Spi::new(p.spi2, p.sck, p.mosi, p.miso, p.tx_dma, p.rx_dma, Irqs, spi_cfg);
+    let spi = Spi::new(
+        p.spi2, p.sck, p.mosi, p.miso, p.tx_dma, p.rx_dma, Irqs, spi_cfg,
+    );
     let cs = Output::new(p.cs, Level::High, Speed::VeryHigh);
-    let int = ExtiInput::new(p.int, unsafe { peripherals::EXTI1::steal() }, Pull::Up, Irqs);
+    let int = ExtiInput::new(
+        p.int,
+        unsafe { peripherals::EXTI1::steal() },
+        Pull::Up,
+        Irqs,
+    );
     let rst = Output::new(p.rst, Level::High, Speed::Low);
 
     static SPI_BUS: StaticCell<AsyncMutex<NoopRawMutex, SpiBus>> = StaticCell::new();
@@ -107,23 +124,20 @@ pub async fn setup(spawner: &embassy_executor::Spawner, p: NetPins) -> &'static 
     let state = STATE.init(embassy_net_wiznet::State::new());
     crate::log::inf("net: spi up, w5500 init");
     let mac = derive_mac_from_uid();
-    let (device, runner) = match embassy_net_wiznet::new::<_, _, embassy_net_wiznet::chip::W5500, _, _, _>(
-        mac,
-        state,
-        spi_dev,
-        int,
-        rst,
-    )
-    .await
-    {
-        Ok(v) => v,
-        Err(_e) => {
-            crate::log::err("net: w5500 init FAILED");
-            loop {
-                embassy_time::Timer::after_millis(1000).await;
+    let (device, runner) =
+        match embassy_net_wiznet::new::<_, _, embassy_net_wiznet::chip::W5500, _, _, _>(
+            mac, state, spi_dev, int, rst,
+        )
+        .await
+        {
+            Ok(v) => v,
+            Err(_e) => {
+                crate::log::err("net: w5500 init FAILED");
+                loop {
+                    embassy_time::Timer::after_millis(1000).await;
+                }
             }
-        }
-    };
+        };
     crate::log::inf("net: w5500 chip ok");
 
     let ip = critical_section::with(|_cs| {
@@ -173,7 +187,9 @@ async fn net_run_task(runner: W5500Runner<'static>) {
 }
 
 #[embassy_executor::task]
-async fn net_stack_task(mut runner: embassy_net::Runner<'static, embassy_net_driver_channel::Device<'static, 1514>>) {
+async fn net_stack_task(
+    mut runner: embassy_net::Runner<'static, embassy_net_driver_channel::Device<'static, 1514>>,
+) {
     crate::stackmark::probe(crate::stackmark::slot::NET_STACK);
     runner.run().await
 }
@@ -230,8 +246,16 @@ async fn udp_task(stack: Stack<'static>) {
         if cmd == 0xFA {
             let mut rep = [0u8; 9];
             rep[0] = 0xFA;
-            rep[1..5].copy_from_slice(&crate::shell::RX_COUNT.load(core::sync::atomic::Ordering::Relaxed).to_le_bytes());
-            rep[5..9].copy_from_slice(&crate::shell::RX_GOT.load(core::sync::atomic::Ordering::Relaxed).to_le_bytes());
+            rep[1..5].copy_from_slice(
+                &crate::shell::RX_COUNT
+                    .load(core::sync::atomic::Ordering::Relaxed)
+                    .to_le_bytes(),
+            );
+            rep[5..9].copy_from_slice(
+                &crate::shell::RX_GOT
+                    .load(core::sync::atomic::Ordering::Relaxed)
+                    .to_le_bytes(),
+            );
             sock.send_to(&rep, meta.endpoint).await.ok();
             continue;
         }
@@ -332,8 +356,9 @@ async fn udp_task(stack: Stack<'static>) {
         // GET_VERSION probes still get answered, so a host polling for
         // "back online" reads the pre-reboot image (stale uptime) and later
         // traffic dies mid-swap.
-        let reboot_now =
-            critical_section::with(|_cs| UDP_STATE.lock(|st| st.borrow_mut().take_reboot_pending()));
+        let reboot_now = critical_section::with(|_cs| {
+            UDP_STATE.lock(|st| st.borrow_mut().take_reboot_pending())
+        });
         if reboot_now {
             crate::log::wrn("udp: delayed reboot");
             // flush history before the swap reboot; the 100ms wait below

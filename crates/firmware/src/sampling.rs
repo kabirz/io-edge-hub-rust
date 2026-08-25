@@ -2,9 +2,9 @@
 //! interval = reg 0x03/0x04 clamped [10,5000]ms, only enabled channels read,
 //! DI bitmap -> input_reg[5]; history records land on the storage queue.
 
-use embassy_stm32::Peri;
 use embassy_stm32::adc::{Adc, SampleTime};
 use embassy_stm32::gpio::{AnyPin, Input, Pull};
+use embassy_stm32::Peri;
 use embassy_time::{Duration, Timer};
 
 use io_edge_hub_proto::adc_math::ai_convert;
@@ -15,7 +15,7 @@ use io_edge_hub_proto::regmap::{
 };
 
 use crate::appstate::REGS;
-use crate::storage::{QUEUE, StorageCmd};
+use crate::storage::{StorageCmd, QUEUE};
 
 /// Queue a history record (send_history_data: full queue drops silently).
 fn send_history_data(d: HisData) {
@@ -43,7 +43,10 @@ pub async fn di_task(pins: DiPins) {
         let (si, en) = critical_section::with(|_cs| {
             REGS.lock(|r| {
                 let r = r.borrow();
-                (r.get_holding(HOLDING_DI_SAMPLE_MS_IDX as u16), r.get_holding(HOLDING_DI_ENABLE_IDX as u16))
+                (
+                    r.get_holding(HOLDING_DI_SAMPLE_MS_IDX as u16),
+                    r.get_holding(HOLDING_DI_ENABLE_IDX as u16),
+                )
             })
         });
         let mut val = 0u16;
@@ -82,7 +85,10 @@ pub async fn ai_task(p: AdcPins) {
         let (si, en) = critical_section::with(|_cs| {
             REGS.lock(|r| {
                 let r = r.borrow();
-                (r.get_holding(HOLDING_AI_SAMPLE_MS_IDX as u16), r.get_holding(HOLDING_AI_ENABLE_IDX as u16))
+                (
+                    r.get_holding(HOLDING_AI_SAMPLE_MS_IDX as u16),
+                    r.get_holding(HOLDING_AI_ENABLE_IDX as u16),
+                )
             })
         });
         macro_rules! sample {
@@ -92,7 +98,9 @@ pub async fn ai_task(p: AdcPins) {
                     let val = ai_convert($i, raw as i32);
                     critical_section::with(|_cs| {
                         REGS.lock(|r| {
-                            r.borrow_mut().update_input((INPUT_AI0_IDX + $i) as u16, val).ok();
+                            r.borrow_mut()
+                                .update_input((INPUT_AI0_IDX + $i) as u16, val)
+                                .ok();
                         });
                     });
                 }
@@ -115,7 +123,11 @@ pub async fn ai_task(p: AdcPins) {
                     ]
                 })
             });
-            send_history_data(HisData::ai(crate::systime::now_epoch(), en & 0x000F, values));
+            send_history_data(HisData::ai(
+                crate::systime::now_epoch(),
+                en & 0x000F,
+                values,
+            ));
         }
         Timer::after(Duration::from_millis(clamp_interval(si))).await;
     }

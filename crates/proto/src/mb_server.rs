@@ -74,7 +74,13 @@ impl MbServer {
 
     /// Decode one PDU. Returns response length written to `out`
     /// (0 = silent drop, e.g. length violation).
-    pub fn process(&mut self, in_: &[u8], out: &mut [u8], regs: &mut RegMap, hooks: &mut impl RegHooks) -> usize {
+    pub fn process(
+        &mut self,
+        in_: &[u8],
+        out: &mut [u8],
+        regs: &mut RegMap,
+        hooks: &mut impl RegHooks,
+    ) -> usize {
         if in_.is_empty() {
             return 0;
         }
@@ -162,7 +168,13 @@ impl MbServer {
         num_bytes + 2
     }
 
-    fn fc03(&mut self, d: &[u8], out: &mut [u8], regs: &mut RegMap, hooks: &mut impl RegHooks) -> usize {
+    fn fc03(
+        &mut self,
+        d: &[u8],
+        out: &mut [u8],
+        regs: &mut RegMap,
+        hooks: &mut impl RegHooks,
+    ) -> usize {
         if d.len() != 4 {
             return 0;
         }
@@ -214,7 +226,13 @@ impl MbServer {
         num_bytes + 2
     }
 
-    fn fc05(&mut self, d: &[u8], out: &mut [u8], regs: &mut RegMap, hooks: &mut impl RegHooks) -> usize {
+    fn fc05(
+        &mut self,
+        d: &[u8],
+        out: &mut [u8],
+        regs: &mut RegMap,
+        hooks: &mut impl RegHooks,
+    ) -> usize {
         if d.len() != 4 {
             return 0;
         }
@@ -230,7 +248,13 @@ impl MbServer {
         5
     }
 
-    fn fc06(&mut self, d: &[u8], out: &mut [u8], regs: &mut RegMap, hooks: &mut impl RegHooks) -> usize {
+    fn fc06(
+        &mut self,
+        d: &[u8],
+        out: &mut [u8],
+        regs: &mut RegMap,
+        hooks: &mut impl RegHooks,
+    ) -> usize {
         if d.len() != 4 {
             return 0;
         }
@@ -267,7 +291,13 @@ impl MbServer {
         5
     }
 
-    fn fc15(&mut self, d: &[u8], out: &mut [u8], regs: &mut RegMap, hooks: &mut impl RegHooks) -> usize {
+    fn fc15(
+        &mut self,
+        d: &[u8],
+        out: &mut [u8],
+        regs: &mut RegMap,
+        hooks: &mut impl RegHooks,
+    ) -> usize {
         if d.len() < 6 {
             return 0;
         }
@@ -286,7 +316,10 @@ impl MbServer {
                 temp = d[5 + i / 8];
             }
             let state = temp & 0x01 != 0;
-            if regs.io_write_do_bit(coil_addr.wrapping_add(i as u16), state, hooks).is_err() {
+            if regs
+                .io_write_do_bit(coil_addr.wrapping_add(i as u16), state, hooks)
+                .is_err()
+            {
                 return self.exc_rsp(MB_FC15_COILS_WR, MB_EXC_ILLEGAL_DATA_ADDR, out);
             }
             temp >>= 1;
@@ -297,7 +330,13 @@ impl MbServer {
         5
     }
 
-    fn fc16(&mut self, d: &[u8], out: &mut [u8], regs: &mut RegMap, hooks: &mut impl RegHooks) -> usize {
+    fn fc16(
+        &mut self,
+        d: &[u8],
+        out: &mut [u8],
+        regs: &mut RegMap,
+        hooks: &mut impl RegHooks,
+    ) -> usize {
         if d.len() < 6 {
             return 0;
         }
@@ -320,7 +359,10 @@ impl MbServer {
         }
         for i in 0..reg_qty as usize {
             let val = bytes::get_be16(&d[5 + i * 2..7 + i * 2]);
-            if regs.io_write_holding(reg_addr.wrapping_add(i as u16), val, hooks).is_err() {
+            if regs
+                .io_write_holding(reg_addr.wrapping_add(i as u16), val, hooks)
+                .is_err()
+            {
                 return self.exc_rsp(MB_FC16_HOLDING_REGS_WR, MB_EXC_ILLEGAL_DATA_ADDR, out);
             }
         }
@@ -350,7 +392,9 @@ mod tests {
     fn fc03_reads_defaults_and_version_reg() {
         let mut srv = MbServer::new();
         let mut regs = RegMap::new(0x0300);
-        let mut h = Mock { do_val: RefCell::new(0) };
+        let mut h = Mock {
+            do_val: RefCell::new(0),
+        };
         let mut out = [0u8; MB_SERVER_PDU_MAX];
         // FC03 addr=0 qty=18 -> 36 bytes, first reg DO=0, IP regs at 0x0A
         let req = [0x03, 0x00, 0x00, 0x00, 0x12];
@@ -358,14 +402,19 @@ mod tests {
         assert_eq!(n, 38);
         assert_eq!(out[0], 3);
         assert_eq!(out[1], 36);
-        assert_eq!(&out[2 + 0x0A * 2..2 + 0x0A * 2 + 8], &[0, 192, 0, 168, 0, 12, 0, 101][..8]);
+        assert_eq!(
+            &out[2 + 0x0A * 2..2 + 0x0A * 2 + 8],
+            &[0, 192, 0, 168, 0, 12, 0, 101][..8]
+        );
     }
 
     #[test]
     fn fc03_qty_violation_exc3_fp_area_exc1() {
         let mut srv = MbServer::new();
         let mut regs = RegMap::new(0x0300);
-        let mut h = Mock { do_val: RefCell::new(0) };
+        let mut h = Mock {
+            do_val: RefCell::new(0),
+        };
         let mut out = [0u8; MB_SERVER_PDU_MAX];
         let n = srv.process(&[0x03, 0x00, 0x00, 0x00, 0x7E], &mut out, &mut regs, &mut h); // qty=126
         assert_eq!(&out[..n], &[0x83, 0x03]);
@@ -381,7 +430,9 @@ mod tests {
     fn fc06_write_drives_do() {
         let mut srv = MbServer::new();
         let mut regs = RegMap::new(0x0300);
-        let mut h = Mock { do_val: RefCell::new(0) };
+        let mut h = Mock {
+            do_val: RefCell::new(0),
+        };
         let mut out = [0u8; MB_SERVER_PDU_MAX];
         let n = srv.process(&[0x06, 0x00, 0x00, 0x00, 0xA5], &mut out, &mut regs, &mut h);
         assert_eq!(n, 5);
@@ -396,7 +447,9 @@ mod tests {
     fn fc05_coil_write_and_echo() {
         let mut srv = MbServer::new();
         let mut regs = RegMap::new(0x0300);
-        let mut h = Mock { do_val: RefCell::new(0) };
+        let mut h = Mock {
+            do_val: RefCell::new(0),
+        };
         let mut out = [0u8; MB_SERVER_PDU_MAX];
         let n = srv.process(&[0x05, 0x00, 0x03, 0xFF, 0x00], &mut out, &mut regs, &mut h);
         assert_eq!(&out[..n], &[0x05, 0x00, 0x03, 0xFF, 0x00]);
@@ -413,9 +466,12 @@ mod tests {
     fn fc01_coil_read_and_fc02_discrete() {
         let mut srv = MbServer::new();
         let mut regs = RegMap::new(0x0300);
-        let mut h = Mock { do_val: RefCell::new(0) };
+        let mut h = Mock {
+            do_val: RefCell::new(0),
+        };
         regs.update_holding(0x00, 0xA5).unwrap();
-        regs.update_input(crate::regmap::INPUT_DI_IDX as u16, 0x8001).unwrap();
+        regs.update_input(crate::regmap::INPUT_DI_IDX as u16, 0x8001)
+            .unwrap();
         let mut out = [0u8; MB_SERVER_PDU_MAX];
         let n = srv.process(&[0x01, 0x00, 0x00, 0x00, 0x08], &mut out, &mut regs, &mut h);
         assert_eq!(n, 3);
@@ -448,7 +504,7 @@ mod tests {
         let _ = srv.process(&[0x08, 0x00, 0x0A, 0x00, 0x00], &mut out, &mut regs, &mut h);
         let n = srv.process(&[0x08, 0x00, 0x0B, 0x00, 0x00], &mut out, &mut regs, &mut h);
         assert_eq!(&out[..n], &[0x08, 0x00, 0x0B, 0x00, 0x01]); // cleared then +this entry... this req counted
-        // unknown subfunc -> exc 0x01
+                                                                // unknown subfunc -> exc 0x01
         let n = srv.process(&[0x08, 0x77, 0x77, 0x00, 0x00], &mut out, &mut regs, &mut h);
         assert_eq!(&out[..n], &[0x88, 0x01]);
     }
@@ -457,15 +513,27 @@ mod tests {
     fn fc16_write_regs_with_quirks() {
         let mut srv = MbServer::new();
         let mut regs = RegMap::new(0x0300);
-        let mut h = Mock { do_val: RefCell::new(0) };
+        let mut h = Mock {
+            do_val: RefCell::new(0),
+        };
         let mut out = [0u8; MB_SERVER_PDU_MAX];
         // write 2 regs at 0x03 (sample ms): 100, 250
-        let n = srv.process(&[0x10, 0x00, 0x03, 0x00, 0x02, 0x04, 0x00, 100, 0x00, 250], &mut out, &mut regs, &mut h);
+        let n = srv.process(
+            &[0x10, 0x00, 0x03, 0x00, 0x02, 0x04, 0x00, 100, 0x00, 250],
+            &mut out,
+            &mut regs,
+            &mut h,
+        );
         assert_eq!(&out[..n], &[0x10, 0x00, 0x03, 0x00, 0x02]);
         assert_eq!(regs.get_holding(0x03), 100);
         assert_eq!(regs.get_holding(0x04), 250);
         // length mismatch -> 0x03
-        let n = srv.process(&[0x10, 0x00, 0x03, 0x00, 0x02, 0x05, 0, 0, 0, 0, 0, 0], &mut out, &mut regs, &mut h);
+        let n = srv.process(
+            &[0x10, 0x00, 0x03, 0x00, 0x02, 0x05, 0, 0, 0, 0, 0, 0],
+            &mut out,
+            &mut regs,
+            &mut h,
+        );
         assert_eq!(&out[..n], &[0x90, 0x03]);
     }
 

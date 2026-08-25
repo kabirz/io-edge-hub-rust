@@ -139,9 +139,11 @@ impl W25q {
         while off < buf.len() {
             let chunk = (buf.len() - off).min(0xFFFF);
             self.cs_low();
-            let r = self
-                .cmd_addr(CMD_READ_DATA, addr)
-                .and_then(|_| self.spi.blocking_read(&mut buf[off..off + chunk]).map_err(|_| ()));
+            let r = self.cmd_addr(CMD_READ_DATA, addr).and_then(|_| {
+                self.spi
+                    .blocking_read(&mut buf[off..off + chunk])
+                    .map_err(|_| ())
+            });
             self.cs_high();
             r?;
             addr += chunk as u32;

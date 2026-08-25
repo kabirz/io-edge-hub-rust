@@ -179,7 +179,11 @@ pub fn ws_frame_hdr(hdr: &mut [u8; 10], opcode: u8, len: usize) -> usize {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FeedEvent {
     /// Complete text/binary payload
-    Frame { fin: bool, opcode: u8, payload_len: usize },
+    Frame {
+        fin: bool,
+        opcode: u8,
+        payload_len: usize,
+    },
     /// Parser wants the session closed (oversize / bad state)
     Close,
 }
@@ -258,7 +262,11 @@ impl WsParser {
                             return false;
                         }
                         self.hdr_got = 0;
-                        self.state = if self.masked { WsFeed::Mask } else { WsFeed::Payload };
+                        self.state = if self.masked {
+                            WsFeed::Mask
+                        } else {
+                            WsFeed::Payload
+                        };
                     }
                 }
                 WsFeed::Len64 => {
@@ -274,7 +282,11 @@ impl WsParser {
                         }
                         self.plen = v as usize;
                         self.hdr_got = 0;
-                        self.state = if self.masked { WsFeed::Mask } else { WsFeed::Payload };
+                        self.state = if self.masked {
+                            WsFeed::Mask
+                        } else {
+                            WsFeed::Payload
+                        };
                     }
                 }
                 WsFeed::Mask => {
@@ -290,10 +302,21 @@ impl WsParser {
                     if idx >= PAYLOAD_MAX {
                         return false;
                     }
-                    self.payload[idx] = if self.masked { b ^ self.mask[idx & 3] } else { b };
+                    self.payload[idx] = if self.masked {
+                        b ^ self.mask[idx & 3]
+                    } else {
+                        b
+                    };
                     self.got = idx + 1;
                     if self.got == self.plen {
-                        event(self, FeedEvent::Frame { fin: self.fin, opcode: self.opcode, payload_len: self.got });
+                        event(
+                            self,
+                            FeedEvent::Frame {
+                                fin: self.fin,
+                                opcode: self.opcode,
+                                payload_len: self.got,
+                            },
+                        );
                         self.state = WsFeed::Header;
                         self.hdr_got = 0;
                     }
@@ -316,13 +339,22 @@ mod tests {
     fn sha1_vectors() {
         let mut s = Sha1::new();
         s.update(b"abc");
-        assert_eq!(hex(&s.finalize()), "a9993e364706816aba3e25717850c26c9cd0d89d");
+        assert_eq!(
+            hex(&s.finalize()),
+            "a9993e364706816aba3e25717850c26c9cd0d89d"
+        );
         let mut s = Sha1::new();
         s.update(b"");
-        assert_eq!(hex(&s.finalize()), "da39a3ee5e6b4b0d3255bfef95601890afd80709");
+        assert_eq!(
+            hex(&s.finalize()),
+            "da39a3ee5e6b4b0d3255bfef95601890afd80709"
+        );
         let mut s = Sha1::new();
         s.update(b"abcdbcdecdefdefgefghfghighijhijkijkljklmklmnlmnomnopnopq");
-        assert_eq!(hex(&s.finalize()), "84983e441c3bd26ebaae4aa1f95129e5e54670f1");
+        assert_eq!(
+            hex(&s.finalize()),
+            "84983e441c3bd26ebaae4aa1f95129e5e54670f1"
+        );
     }
 
     #[test]
@@ -337,11 +369,18 @@ mod tests {
     #[test]
     fn masked_text_frame_roundtrip() {
         // client frame from RFC 6455 §5.7: masked "Hello"
-        let frame = [0x81, 0x85, 0x37, 0xfa, 0x21, 0x3d, 0x7f, 0x9f, 0x4d, 0x51, 0x58];
+        let frame = [
+            0x81, 0x85, 0x37, 0xfa, 0x21, 0x3d, 0x7f, 0x9f, 0x4d, 0x51, 0x58,
+        ];
         let mut p = WsParser::new();
         let mut seen = 0;
         let ok = p.feed(&frame, |_, ev| {
-            if let FeedEvent::Frame { fin, opcode, payload_len } = ev {
+            if let FeedEvent::Frame {
+                fin,
+                opcode,
+                payload_len,
+            } = ev
+            {
                 assert!(fin && opcode == 1 && payload_len == 5);
                 seen += 1;
             }

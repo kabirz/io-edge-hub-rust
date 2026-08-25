@@ -1,4 +1,4 @@
-﻿#![no_std]
+#![no_std]
 #![no_main]
 
 mod appstate;
@@ -22,7 +22,9 @@ mod w25q;
 
 use embassy_executor::Spawner;
 use embassy_stm32::gpio::{Level, Output, Speed};
-use embassy_stm32::rcc::{self, Hse, HseMode, Pll, PllMul, PllPDiv, PllPreDiv, PllQDiv, PllSource, Sysclk};
+use embassy_stm32::rcc::{
+    self, Hse, HseMode, Pll, PllMul, PllPDiv, PllPreDiv, PllQDiv, PllSource, Sysclk,
+};
 use embassy_stm32::rtc::{Rtc, RtcConfig};
 use embassy_stm32::time::Hertz;
 use embassy_stm32::wdg::IndependentWatchdog;
@@ -33,7 +35,10 @@ fn board_config() -> BoardConfig {
     let mut cfg = BoardConfig::default();
     // HSE 13MHz /13 *336 /2 = 168MHz SYSCLK, APB1 42MHz, APB2 84MHz
     cfg.rcc = rcc::Config::new();
-    cfg.rcc.hse = Some(Hse { freq: Hertz(13_000_000), mode: HseMode::Oscillator });
+    cfg.rcc.hse = Some(Hse {
+        freq: Hertz(13_000_000),
+        mode: HseMode::Oscillator,
+    });
     cfg.rcc.pll_src = PllSource::HSE;
     cfg.rcc.pll = Some(Pll {
         prediv: PllPreDiv::DIV13,
@@ -63,7 +68,8 @@ async fn main(spawner: Spawner) {
         core::ptr::write_volatile(0xE000_ED08 as *mut u32, 0x0801_0200); // SCB.VTOR
         for i in 0..3usize {
             core::ptr::write_volatile((0xE000_E180 + 4 * i) as *mut u32, 0xFFFF_FFFF); // ICER: disable all
-            core::ptr::write_volatile((0xE000_E280 + 4 * i) as *mut u32, 0xFFFF_FFFF); // ICPR: clear pending
+            core::ptr::write_volatile((0xE000_E280 + 4 * i) as *mut u32, 0xFFFF_FFFF);
+            // ICPR: clear pending
         }
         // wipe leftover EXTI configuration from the loader: triggers + mask + pending
         core::ptr::write_volatile(0x4001_3C08 as *mut u32, 0x0); // RTSR
@@ -102,7 +108,10 @@ async fn main(spawner: Spawner) {
     use core::fmt::Write as _;
     let mut banner = heapless::String::<64>::new();
     banner
-        .write_fmt(format_args!("io-edge-hub rust {} boot", appstate::version::FW_VERSION))
+        .write_fmt(format_args!(
+            "io-edge-hub rust {} boot",
+            appstate::version::FW_VERSION
+        ))
         .ok();
     log::inf(&banner);
 
@@ -129,7 +138,6 @@ async fn main(spawner: Spawner) {
             Some(Output::new(dp.PE15, Level::Low, Speed::Low)),
         ],
     );
-
 
     // RTC-backed system time (VBAT persistent)
     let (rtc, tp) = Rtc::new(dp.RTC, RtcConfig::default());
@@ -188,32 +196,31 @@ async fn main(spawner: Spawner) {
     static MB_RX2: static_cell::StaticCell<[u8; 512]> = static_cell::StaticCell::new();
     #[link_section = ".ccm.bss"]
     static MB_TX2: static_cell::StaticCell<[u8; 512]> = static_cell::StaticCell::new();
-    spawner
-        .spawn(mbtcp::conn_task(
+    spawner.spawn(
+        mbtcp::conn_task(
             *stack,
             stackmark::slot::MBTCP1,
             MB_RX1.init([0u8; 512]),
             MB_TX1.init([0u8; 512]),
         )
-        .expect("spawn mbtcp1"));
-    spawner
-        .spawn(mbtcp::conn_task(
+        .expect("spawn mbtcp1"),
+    );
+    spawner.spawn(
+        mbtcp::conn_task(
             *stack,
             stackmark::slot::MBTCP2,
             MB_RX2.init([0u8; 512]),
             MB_TX2.init([0u8; 512]),
         )
-        .expect("spawn mbtcp2"));
+        .expect("spawn mbtcp2"),
+    );
     // 3rd listener accepts-then-aborts the excess master
     static RJ_RX: static_cell::StaticCell<[u8; 64]> = static_cell::StaticCell::new();
     static RJ_TX: static_cell::StaticCell<[u8; 64]> = static_cell::StaticCell::new();
-    spawner
-        .spawn(mbtcp::reject_task(
-            *stack,
-            RJ_RX.init([0u8; 64]),
-            RJ_TX.init([0u8; 64]),
-        )
-        .expect("spawn mbreject"));
+    spawner.spawn(
+        mbtcp::reject_task(*stack, RJ_RX.init([0u8; 64]), RJ_TX.init([0u8; 64]))
+            .expect("spawn mbreject"),
+    );
     log::inf("mbtcp: port 502 listening");
 
     // HTTP :80 (2 connections, httpd.c cap); per-instance socket buffers
@@ -226,22 +233,24 @@ async fn main(spawner: Spawner) {
     static HTTP_RX2: static_cell::StaticCell<[u8; 640]> = static_cell::StaticCell::new();
     #[link_section = ".ccm.bss"]
     static HTTP_TX2: static_cell::StaticCell<[u8; 2048]> = static_cell::StaticCell::new();
-    spawner
-        .spawn(httpd::http_task(
+    spawner.spawn(
+        httpd::http_task(
             *stack,
             stackmark::slot::HTTP1,
             HTTP_RX1.init([0u8; 640]),
             HTTP_TX1.init([0u8; 2048]),
         )
-        .expect("spawn http1"));
-    spawner
-        .spawn(httpd::http_task(
+        .expect("spawn http1"),
+    );
+    spawner.spawn(
+        httpd::http_task(
             *stack,
             stackmark::slot::HTTP2,
             HTTP_RX2.init([0u8; 640]),
             HTTP_TX2.init([0u8; 2048]),
         )
-        .expect("spawn http2"));
+        .expect("spawn http2"),
+    );
     log::inf("httpd: port 80 listening");
 
     // FTP :21 (3 sessions + 421 rejector, ftpd.c cap); the socket buffers
@@ -274,8 +283,8 @@ async fn main(spawner: Spawner) {
     static FRJ: static_cell::StaticCell<[u8; 128]> = static_cell::StaticCell::new();
     #[link_section = ".ccm.bss"]
     static FTJ: static_cell::StaticCell<[u8; 128]> = static_cell::StaticCell::new();
-    spawner
-        .spawn(ftpd::ftp_task(
+    spawner.spawn(
+        ftpd::ftp_task(
             *stack,
             0,
             FR1.init([0u8; 1024]),
@@ -283,9 +292,10 @@ async fn main(spawner: Spawner) {
             FDR1.init([0u8; 2048]),
             FDT1.init([0u8; 2048]),
         )
-        .expect("spawn ftp1"));
-    spawner
-        .spawn(ftpd::ftp_task(
+        .expect("spawn ftp1"),
+    );
+    spawner.spawn(
+        ftpd::ftp_task(
             *stack,
             1,
             FR2.init([0u8; 1024]),
@@ -293,9 +303,10 @@ async fn main(spawner: Spawner) {
             FDR2.init([0u8; 2048]),
             FDT2.init([0u8; 2048]),
         )
-        .expect("spawn ftp2"));
-    spawner
-        .spawn(ftpd::ftp_task(
+        .expect("spawn ftp2"),
+    );
+    spawner.spawn(
+        ftpd::ftp_task(
             *stack,
             2,
             FR3.init([0u8; 1024]),
@@ -303,18 +314,17 @@ async fn main(spawner: Spawner) {
             FDR3.init([0u8; 2048]),
             FDT3.init([0u8; 2048]),
         )
-        .expect("spawn ftp3"));
-    spawner
-        .spawn(ftpd::ftp_reject_task(
-            *stack,
-            FRJ.init([0u8; 128]),
-            FTJ.init([0u8; 128]),
-        ).expect("spawn ftprej"));
+        .expect("spawn ftp3"),
+    );
+    spawner.spawn(
+        ftpd::ftp_reject_task(*stack, FRJ.init([0u8; 128]), FTJ.init([0u8; 128]))
+            .expect("spawn ftprej"),
+    );
     log::inf("ftp: port 21 listening");
 
     // Modbus RTU on USART2 + DE PA1 (baud/slave snapshot from cfg)
-    spawner
-        .spawn(rtu::rtu_task(rtu::RtuPins {
+    spawner.spawn(
+        rtu::rtu_task(rtu::RtuPins {
             usart2: dp.USART2,
             rx: dp.PA3,
             tx: dp.PA2,
@@ -322,17 +332,15 @@ async fn main(spawner: Spawner) {
             tx_dma: dp.DMA1_CH6,
             rx_dma: dp.DMA1_CH5,
         })
-        .expect("spawn rtu"));
+        .expect("spawn rtu"),
+    );
 
     // CAN1 fw-upgrade channel (PA11/PA12, baud/id snapshot from cfg)
-    spawner
-        .spawn(
-            fw_can::fw_can_task(dp.CAN1, dp.PA11, dp.PA12).expect("spawn fwcan"),
-        );
+    spawner.spawn(fw_can::fw_can_task(dp.CAN1, dp.PA11, dp.PA12).expect("spawn fwcan"));
 
     // DI16 sampling (channel order = dio.c di_pins, pull-down active-high)
-    spawner
-        .spawn(sampling::di_task(sampling::DiPins([
+    spawner.spawn(
+        sampling::di_task(sampling::DiPins([
             dp.PD3.into(),
             dp.PD4.into(),
             dp.PD5.into(),
@@ -350,18 +358,20 @@ async fn main(spawner: Spawner) {
             dp.PB3.into(),
             dp.PB4.into(),
         ]))
-        .expect("spawn di"));
+        .expect("spawn di"),
+    );
 
     // AI4 sampling on ADC1 IN10-13 = PC0-PC3
-    spawner
-        .spawn(sampling::ai_task(sampling::AdcPins {
+    spawner.spawn(
+        sampling::ai_task(sampling::AdcPins {
             adc1: dp.ADC1,
             ch0: dp.PC0,
             ch1: dp.PC1,
             ch2: dp.PC2,
             ch3: dp.PC3,
         })
-        .expect("spawn ai"));
+        .expect("spawn ai"),
+    );
     log::inf("io: DI16/AI4 sampling, rtu up");
     stackmark::probe(stackmark::slot::MAIN);
 }
@@ -412,7 +422,11 @@ async fn heartbeat(
             }
         }
         // heartbeat LED: 300ms on / 2700ms off
-        led.set_level(if ticks % 30 < 3 { Level::High } else { Level::Low });
+        led.set_level(if ticks % 30 < 3 {
+            Level::High
+        } else {
+            Level::Low
+        });
     }
 }
 
@@ -435,4 +449,3 @@ fn panic(info: &core::panic::PanicInfo) -> ! {
     }
     cortex_m::asm::udf()
 }
-

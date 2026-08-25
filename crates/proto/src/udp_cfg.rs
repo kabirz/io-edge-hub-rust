@@ -82,7 +82,13 @@ impl UdpCfgState {
         self.factory_reboot_pending || self.reboot_pending
     }
 
-    fn factory_reset(&mut self, reply: &mut [u8], cmd: u8, now_ms: u32, cfg: &mut impl CfgHooks) -> usize {
+    fn factory_reset(
+        &mut self,
+        reply: &mut [u8],
+        cmd: u8,
+        now_ms: u32,
+        cfg: &mut impl CfgHooks,
+    ) -> usize {
         if !self.factory_confirmed {
             if now_ms.wrapping_sub(self.factory_pending_ms) > 5000 {
                 // first command (or >5s since last): record time, await confirm
@@ -158,7 +164,10 @@ pub fn udp_app_cmd(
             let mut ok = 0;
             if data.len() >= 3 {
                 let _ = regs.update_holding(HOLDING_SLAVE_ID_IDX as u16, data[0] as u16);
-                let _ = regs.update_holding(HOLDING_RS485_BAUDRATE_IDX as u16, bytes::get_be16(&data[1..3]));
+                let _ = regs.update_holding(
+                    HOLDING_RS485_BAUDRATE_IDX as u16,
+                    bytes::get_be16(&data[1..3]),
+                );
                 hooks.holding_save();
                 ok = 1;
             }
@@ -171,7 +180,10 @@ pub fn udp_app_cmd(
             }
             reply[0] = cmd;
             reply[1] = regs.get_holding(HOLDING_SLAVE_ID_IDX as u16) as u8;
-            bytes::put_be16(regs.get_holding(HOLDING_RS485_BAUDRATE_IDX as u16), &mut reply[2..4]);
+            bytes::put_be16(
+                regs.get_holding(HOLDING_RS485_BAUDRATE_IDX as u16),
+                &mut reply[2..4],
+            );
             4
         }
 
@@ -248,17 +260,38 @@ mod tests {
     }
 
     fn ver() -> UdpVersion {
-        UdpVersion { major: 0, minor: 3, patch: 0, git: b"538a9b" }
+        UdpVersion {
+            major: 0,
+            minor: 3,
+            patch: 0,
+            git: b"538a9b",
+        }
     }
 
     #[test]
     fn get_ip_defaults() {
         let mut rep = [0u8; 64];
         let mut r = RegMap::new(0x0300);
-        let mut h = MockHooks { ts_val: RefCell::new(None), ts_calls: RefCell::new(0), saves: RefCell::new(0) };
-        let mut c = MockCfg { erases: RefCell::new(0) };
+        let mut h = MockHooks {
+            ts_val: RefCell::new(None),
+            ts_calls: RefCell::new(0),
+            saves: RefCell::new(0),
+        };
+        let mut c = MockCfg {
+            erases: RefCell::new(0),
+        };
         let mut st = UdpCfgState::new();
-        let n = udp_app_cmd(0x11, &[], &mut rep, &mut r, &mut h, &mut c, &mut st, 0, &ver());
+        let n = udp_app_cmd(
+            0x11,
+            &[],
+            &mut rep,
+            &mut r,
+            &mut h,
+            &mut c,
+            &mut st,
+            0,
+            &ver(),
+        );
         assert_eq!(n, 5);
         assert_eq!(&rep[..5], &[0x11, 192, 168, 12, 101]);
     }
@@ -267,25 +300,77 @@ mod tests {
     fn set_ip_valid_and_invalid() {
         let mut rep = [0u8; 64];
         let mut r = RegMap::new(0x0300);
-        let mut h = MockHooks { ts_val: RefCell::new(None), ts_calls: RefCell::new(0), saves: RefCell::new(0) };
-        let mut c = MockCfg { erases: RefCell::new(0) };
+        let mut h = MockHooks {
+            ts_val: RefCell::new(None),
+            ts_calls: RefCell::new(0),
+            saves: RefCell::new(0),
+        };
+        let mut c = MockCfg {
+            erases: RefCell::new(0),
+        };
         let mut st = UdpCfgState::new();
 
-        let n = udp_app_cmd(0x10, &[10, 20, 30, 40], &mut rep, &mut r, &mut h, &mut c, &mut st, 0, &ver());
+        let n = udp_app_cmd(
+            0x10,
+            &[10, 20, 30, 40],
+            &mut rep,
+            &mut r,
+            &mut h,
+            &mut c,
+            &mut st,
+            0,
+            &ver(),
+        );
         assert_eq!(&rep[..n], &[0x10, 0x01]);
         assert_eq!(r.ip_octets(), [10, 20, 30, 40]);
         assert_eq!(*h.saves.borrow(), 1);
 
-        for bad in [[192u8, 168, 12, 0], [192, 168, 12, 255], [127, 0, 0, 1], [224, 0, 0, 1], [240, 0, 0, 1]] {
-            let n = udp_app_cmd(0x10, &bad, &mut rep, &mut r, &mut h, &mut c, &mut st, 0, &ver());
+        for bad in [
+            [192u8, 168, 12, 0],
+            [192, 168, 12, 255],
+            [127, 0, 0, 1],
+            [224, 0, 0, 1],
+            [240, 0, 0, 1],
+        ] {
+            let n = udp_app_cmd(
+                0x10,
+                &bad,
+                &mut rep,
+                &mut r,
+                &mut h,
+                &mut c,
+                &mut st,
+                0,
+                &ver(),
+            );
             assert_eq!(&rep[..n], &[0x10, 0x00]);
         }
         // short length still replies, regs untouched
-        let n = udp_app_cmd(0x10, &[1, 2, 3], &mut rep, &mut r, &mut h, &mut c, &mut st, 0, &ver());
+        let n = udp_app_cmd(
+            0x10,
+            &[1, 2, 3],
+            &mut rep,
+            &mut r,
+            &mut h,
+            &mut c,
+            &mut st,
+            0,
+            &ver(),
+        );
         assert_eq!(&rep[..n], &[0x10, 0x00]);
         assert_eq!(r.ip_octets(), [10, 20, 30, 40]);
 
-        let n = udp_app_cmd(0x11, &[], &mut rep, &mut r, &mut h, &mut c, &mut st, 0, &ver());
+        let n = udp_app_cmd(
+            0x11,
+            &[],
+            &mut rep,
+            &mut r,
+            &mut h,
+            &mut c,
+            &mut st,
+            0,
+            &ver(),
+        );
         assert_eq!(&rep[..n], &[0x11, 10, 20, 30, 40]);
     }
 
@@ -293,20 +378,56 @@ mod tests {
     fn set_get_modbus() {
         let mut rep = [0u8; 64];
         let mut r = RegMap::new(0x0300);
-        let mut h = MockHooks { ts_val: RefCell::new(None), ts_calls: RefCell::new(0), saves: RefCell::new(0) };
-        let mut c = MockCfg { erases: RefCell::new(0) };
+        let mut h = MockHooks {
+            ts_val: RefCell::new(None),
+            ts_calls: RefCell::new(0),
+            saves: RefCell::new(0),
+        };
+        let mut c = MockCfg {
+            erases: RefCell::new(0),
+        };
         let mut st = UdpCfgState::new();
 
-        let n = udp_app_cmd(0x12, &[5, 0x4B, 0x00], &mut rep, &mut r, &mut h, &mut c, &mut st, 0, &ver());
+        let n = udp_app_cmd(
+            0x12,
+            &[5, 0x4B, 0x00],
+            &mut rep,
+            &mut r,
+            &mut h,
+            &mut c,
+            &mut st,
+            0,
+            &ver(),
+        );
         assert_eq!(&rep[..n], &[0x12, 0x01]);
         assert_eq!(r.get_holding(0x09), 5);
         assert_eq!(r.get_holding(0x08), 19200);
 
-        let n = udp_app_cmd(0x12, &[7, 0x4B], &mut rep, &mut r, &mut h, &mut c, &mut st, 0, &ver());
+        let n = udp_app_cmd(
+            0x12,
+            &[7, 0x4B],
+            &mut rep,
+            &mut r,
+            &mut h,
+            &mut c,
+            &mut st,
+            0,
+            &ver(),
+        );
         assert_eq!(&rep[..n], &[0x12, 0x00]);
         assert_eq!(r.get_holding(0x09), 5);
 
-        let n = udp_app_cmd(0x13, &[], &mut rep, &mut r, &mut h, &mut c, &mut st, 0, &ver());
+        let n = udp_app_cmd(
+            0x13,
+            &[],
+            &mut rep,
+            &mut r,
+            &mut h,
+            &mut c,
+            &mut st,
+            0,
+            &ver(),
+        );
         assert_eq!(&rep[..n], &[0x13, 5, 0x4B, 0x00]);
     }
 
@@ -314,23 +435,59 @@ mod tests {
     fn set_time_range_gate_via_hook() {
         let mut rep = [0u8; 64];
         let mut r = RegMap::new(0x0300);
-        let mut h = MockHooks { ts_val: RefCell::new(None), ts_calls: RefCell::new(0), saves: RefCell::new(0) };
-        let mut c = MockCfg { erases: RefCell::new(0) };
+        let mut h = MockHooks {
+            ts_val: RefCell::new(None),
+            ts_calls: RefCell::new(0),
+            saves: RefCell::new(0),
+        };
+        let mut c = MockCfg {
+            erases: RefCell::new(0),
+        };
         let mut st = UdpCfgState::new();
 
         let mut t = [0u8; 4];
         bytes::put_be32(1_787_184_000, &mut t);
-        let n = udp_app_cmd(0x14, &t, &mut rep, &mut r, &mut h, &mut c, &mut st, 0, &ver());
+        let n = udp_app_cmd(
+            0x14,
+            &t,
+            &mut rep,
+            &mut r,
+            &mut h,
+            &mut c,
+            &mut st,
+            0,
+            &ver(),
+        );
         assert_eq!(&rep[..n], &[0x14, 0x01]);
         assert_eq!(*h.ts_val.borrow(), Some(1_787_184_000));
         assert_eq!(*h.ts_calls.borrow(), 1);
 
         bytes::put_be32(946_684_799, &mut t);
-        let n = udp_app_cmd(0x14, &t, &mut rep, &mut r, &mut h, &mut c, &mut st, 0, &ver());
+        let n = udp_app_cmd(
+            0x14,
+            &t,
+            &mut rep,
+            &mut r,
+            &mut h,
+            &mut c,
+            &mut st,
+            0,
+            &ver(),
+        );
         assert_eq!(&rep[..n], &[0x14, 0x00]);
         assert_eq!(*h.ts_calls.borrow(), 2);
 
-        let n = udp_app_cmd(0x14, &t[..3], &mut rep, &mut r, &mut h, &mut c, &mut st, 0, &ver());
+        let n = udp_app_cmd(
+            0x14,
+            &t[..3],
+            &mut rep,
+            &mut r,
+            &mut h,
+            &mut c,
+            &mut st,
+            0,
+            &ver(),
+        );
         assert_eq!(&rep[..n], &[0x14, 0x00]);
         assert_eq!(*h.ts_calls.borrow(), 2);
     }
@@ -339,10 +496,26 @@ mod tests {
     fn get_version_format() {
         let mut rep = [0u8; 64];
         let mut r = RegMap::new(0x0300);
-        let mut h = MockHooks { ts_val: RefCell::new(None), ts_calls: RefCell::new(0), saves: RefCell::new(0) };
-        let mut c = MockCfg { erases: RefCell::new(0) };
+        let mut h = MockHooks {
+            ts_val: RefCell::new(None),
+            ts_calls: RefCell::new(0),
+            saves: RefCell::new(0),
+        };
+        let mut c = MockCfg {
+            erases: RefCell::new(0),
+        };
         let mut st = UdpCfgState::new();
-        let n = udp_app_cmd(0x04, &[], &mut rep, &mut r, &mut h, &mut c, &mut st, 0, &ver());
+        let n = udp_app_cmd(
+            0x04,
+            &[],
+            &mut rep,
+            &mut r,
+            &mut h,
+            &mut c,
+            &mut st,
+            0,
+            &ver(),
+        );
         assert_eq!(n, 14);
         assert_eq!(&rep[..n], b"\x04v0.3.0_538a9b");
     }
@@ -351,16 +524,42 @@ mod tests {
     fn factory_reset_two_step() {
         let mut rep = [0u8; 64];
         let mut r = RegMap::new(0x0300);
-        let mut h = MockHooks { ts_val: RefCell::new(None), ts_calls: RefCell::new(0), saves: RefCell::new(0) };
-        let mut c = MockCfg { erases: RefCell::new(0) };
+        let mut h = MockHooks {
+            ts_val: RefCell::new(None),
+            ts_calls: RefCell::new(0),
+            saves: RefCell::new(0),
+        };
+        let mut c = MockCfg {
+            erases: RefCell::new(0),
+        };
         let mut st = UdpCfgState::new();
 
-        let n = udp_app_cmd(0x19, &[], &mut rep, &mut r, &mut h, &mut c, &mut st, 10_000, &ver());
+        let n = udp_app_cmd(
+            0x19,
+            &[],
+            &mut rep,
+            &mut r,
+            &mut h,
+            &mut c,
+            &mut st,
+            10_000,
+            &ver(),
+        );
         assert_eq!(&rep[..n], &[0x19, 0x00]);
         assert!(!st.reboot_pending());
         assert_eq!(*c.erases.borrow(), 0);
 
-        let n = udp_app_cmd(0x19, &[], &mut rep, &mut r, &mut h, &mut c, &mut st, 13_000, &ver());
+        let n = udp_app_cmd(
+            0x19,
+            &[],
+            &mut rep,
+            &mut r,
+            &mut h,
+            &mut c,
+            &mut st,
+            13_000,
+            &ver(),
+        );
         assert_eq!(&rep[..n], &[0x19, 0x01]);
         assert_eq!(*c.erases.borrow(), 1);
         assert!(st.take_reboot_pending());
@@ -371,17 +570,53 @@ mod tests {
     fn factory_reset_expires_after_5s() {
         let mut rep = [0u8; 64];
         let mut r = RegMap::new(0x0300);
-        let mut h = MockHooks { ts_val: RefCell::new(None), ts_calls: RefCell::new(0), saves: RefCell::new(0) };
-        let mut c = MockCfg { erases: RefCell::new(0) };
+        let mut h = MockHooks {
+            ts_val: RefCell::new(None),
+            ts_calls: RefCell::new(0),
+            saves: RefCell::new(0),
+        };
+        let mut c = MockCfg {
+            erases: RefCell::new(0),
+        };
         let mut st = UdpCfgState::new();
 
-        let _ = udp_app_cmd(0x19, &[], &mut rep, &mut r, &mut h, &mut c, &mut st, 20_000, &ver());
+        let _ = udp_app_cmd(
+            0x19,
+            &[],
+            &mut rep,
+            &mut r,
+            &mut h,
+            &mut c,
+            &mut st,
+            20_000,
+            &ver(),
+        );
         // +5001ms > 5000: re-arms the timer instead of confirming
-        let n = udp_app_cmd(0x19, &[], &mut rep, &mut r, &mut h, &mut c, &mut st, 25_001, &ver());
+        let n = udp_app_cmd(
+            0x19,
+            &[],
+            &mut rep,
+            &mut r,
+            &mut h,
+            &mut c,
+            &mut st,
+            25_001,
+            &ver(),
+        );
         assert_eq!(&rep[..n], &[0x19, 0x00]);
         assert!(!st.reboot_pending());
         // exactly +5000ms (not > 5000) from re-arm = confirm
-        let n = udp_app_cmd(0x19, &[], &mut rep, &mut r, &mut h, &mut c, &mut st, 30_001, &ver());
+        let n = udp_app_cmd(
+            0x19,
+            &[],
+            &mut rep,
+            &mut r,
+            &mut h,
+            &mut c,
+            &mut st,
+            30_001,
+            &ver(),
+        );
         assert_eq!(&rep[..n], &[0x19, 0x01]);
     }
 
@@ -389,21 +624,57 @@ mod tests {
     fn factory_reset_single_command_quirk_within_boot_5s() {
         let mut rep = [0u8; 64];
         let mut r = RegMap::new(0x0300);
-        let mut h = MockHooks { ts_val: RefCell::new(None), ts_calls: RefCell::new(0), saves: RefCell::new(0) };
-        let mut c = MockCfg { erases: RefCell::new(0) };
+        let mut h = MockHooks {
+            ts_val: RefCell::new(None),
+            ts_calls: RefCell::new(0),
+            saves: RefCell::new(0),
+        };
+        let mut c = MockCfg {
+            erases: RefCell::new(0),
+        };
         let mut st = UdpCfgState::new();
 
         // uptime 4000ms: (4000 - 0) not > 5000 -> immediate confirm
-        let n = udp_app_cmd(0x19, &[], &mut rep, &mut r, &mut h, &mut c, &mut st, 4_000, &ver());
+        let n = udp_app_cmd(
+            0x19,
+            &[],
+            &mut rep,
+            &mut r,
+            &mut h,
+            &mut c,
+            &mut st,
+            4_000,
+            &ver(),
+        );
         assert_eq!(&rep[..n], &[0x19, 0x01]);
         assert!(st.take_reboot_pending());
 
         // boundary: exactly 5000ms still single-command; 5001ms restores two-step
         st.reset_pending();
-        let n = udp_app_cmd(0x19, &[], &mut rep, &mut r, &mut h, &mut c, &mut st, 5_000, &ver());
+        let n = udp_app_cmd(
+            0x19,
+            &[],
+            &mut rep,
+            &mut r,
+            &mut h,
+            &mut c,
+            &mut st,
+            5_000,
+            &ver(),
+        );
         assert_eq!(&rep[..n], &[0x19, 0x01]);
         st.reset_pending();
-        let n = udp_app_cmd(0x19, &[], &mut rep, &mut r, &mut h, &mut c, &mut st, 5_001, &ver());
+        let n = udp_app_cmd(
+            0x19,
+            &[],
+            &mut rep,
+            &mut r,
+            &mut h,
+            &mut c,
+            &mut st,
+            5_001,
+            &ver(),
+        );
         assert_eq!(&rep[..n], &[0x19, 0x00]);
     }
 
@@ -411,10 +682,26 @@ mod tests {
     fn reboot_sets_pending_and_replies() {
         let mut rep = [0u8; 64];
         let mut r = RegMap::new(0x0300);
-        let mut h = MockHooks { ts_val: RefCell::new(None), ts_calls: RefCell::new(0), saves: RefCell::new(0) };
-        let mut c = MockCfg { erases: RefCell::new(0) };
+        let mut h = MockHooks {
+            ts_val: RefCell::new(None),
+            ts_calls: RefCell::new(0),
+            saves: RefCell::new(0),
+        };
+        let mut c = MockCfg {
+            erases: RefCell::new(0),
+        };
         let mut st = UdpCfgState::new();
-        let n = udp_app_cmd(0x05, &[], &mut rep, &mut r, &mut h, &mut c, &mut st, 0, &ver());
+        let n = udp_app_cmd(
+            0x05,
+            &[],
+            &mut rep,
+            &mut r,
+            &mut h,
+            &mut c,
+            &mut st,
+            0,
+            &ver(),
+        );
         assert_eq!(&rep[..n], &[0x05, 0x01]);
         assert!(st.take_reboot_pending());
     }
@@ -423,11 +710,30 @@ mod tests {
     fn unknown_commands_silent() {
         let mut rep = [0u8; 64];
         let mut r = RegMap::new(0x0300);
-        let mut h = MockHooks { ts_val: RefCell::new(None), ts_calls: RefCell::new(0), saves: RefCell::new(0) };
-        let mut c = MockCfg { erases: RefCell::new(0) };
+        let mut h = MockHooks {
+            ts_val: RefCell::new(None),
+            ts_calls: RefCell::new(0),
+            saves: RefCell::new(0),
+        };
+        let mut c = MockCfg {
+            erases: RefCell::new(0),
+        };
         let mut st = UdpCfgState::new();
         for cmd in [0x01u8, 0x06, 0x00, 0x0F, 0x15, 0x20, 0xFF] {
-            assert_eq!(udp_app_cmd(cmd, &[1, 2, 3, 4, 5], &mut rep, &mut r, &mut h, &mut c, &mut st, 0, &ver()), 0);
+            assert_eq!(
+                udp_app_cmd(
+                    cmd,
+                    &[1, 2, 3, 4, 5],
+                    &mut rep,
+                    &mut r,
+                    &mut h,
+                    &mut c,
+                    &mut st,
+                    0,
+                    &ver()
+                ),
+                0
+            );
         }
         assert!(!st.reboot_pending());
         assert_eq!(*c.erases.borrow(), 0);

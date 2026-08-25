@@ -3,20 +3,20 @@
 
 use core::fmt::Write as _;
 
-use embassy_net::tcp::TcpSocket;
-use embassy_net::{IpAddress, Stack, Ipv4Address};
 use core::sync::atomic::{AtomicBool, Ordering};
+use embassy_net::tcp::TcpSocket;
+use embassy_net::{IpAddress, Ipv4Address, Stack};
 
 use embassy_time::{Duration, Instant, Ticker, Timer};
 use embedded_io_async::Write as _;
 
-use io_edge_hub_proto::regmap::{
-    self as rm, RegHooks, RegMap,
+use io_edge_hub_proto::regmap::{self as rm, RegHooks, RegMap};
+use io_edge_hub_proto::web_json::{
+    history_web_name_valid, json_get_i32, json_get_str, url_query_get,
 };
-use io_edge_hub_proto::web_json::{history_web_name_valid, json_get_i32, json_get_str, url_query_get};
-use io_edge_hub_proto::ws::{FeedEvent, WsParser, ws_accept_key, ws_frame_hdr};
+use io_edge_hub_proto::ws::{ws_accept_key, ws_frame_hdr, FeedEvent, WsParser};
 
-use crate::appstate::{Hooks, REGS, version};
+use crate::appstate::{version, Hooks, REGS};
 use crate::{log, reboot, systime};
 
 pub const HTTP_PORT: u16 = 80;
@@ -59,7 +59,11 @@ async fn serve(sock: &mut TcpSocket<'static>, slot: usize) {
     loop {
         crate::stackmark::probe(slot);
         // 5s half-request timeout, 60s keep-alive idle
-        let limit = if rx_len > 0 { Duration::from_secs(5) } else { Duration::from_secs(60) };
+        let limit = if rx_len > 0 {
+            Duration::from_secs(5)
+        } else {
+            Duration::from_secs(60)
+        };
         let n = match embassy_futures::select::select(
             sock.read(&mut rbuf[rx_len.min(RX_BUF - 1)..]),
             Timer::after(limit),
@@ -82,8 +86,14 @@ async fn serve(sock: &mut TcpSocket<'static>, slot: usize) {
                 Some(i) => i,
                 None => {
                     if rx_len >= RX_BUF - 1 {
-                        respond(sock, "400 Bad Request", "application/json",
-                            b"{\"ok\":false,\"err\":\"header too large\"}", false).await;
+                        respond(
+                            sock,
+                            "400 Bad Request",
+                            "application/json",
+                            b"{\"ok\":false,\"err\":\"header too large\"}",
+                            false,
+                        )
+                        .await;
                         return;
                     }
                     break;
@@ -94,8 +104,14 @@ async fn serve(sock: &mut TcpSocket<'static>, slot: usize) {
             let (mlen, tlen) = match parse_request_line(&rbuf[..he], &mut m, &mut target) {
                 Some(v) => v,
                 None => {
-                    respond(sock, "400 Bad Request", "application/json",
-                        b"{\"ok\":false,\"err\":\"bad request\"}", false).await;
+                    respond(
+                        sock,
+                        "400 Bad Request",
+                        "application/json",
+                        b"{\"ok\":false,\"err\":\"bad request\"}",
+                        false,
+                    )
+                    .await;
                     return;
                 }
             };
@@ -106,8 +122,14 @@ async fn serve(sock: &mut TcpSocket<'static>, slot: usize) {
                 .unwrap_or(false);
 
             if content_len > BODY_MAX {
-                respond(sock, "400 Bad Request", "application/json",
-                    b"{\"ok\":false,\"err\":\"body too large\"}", false).await;
+                respond(
+                    sock,
+                    "400 Bad Request",
+                    "application/json",
+                    b"{\"ok\":false,\"err\":\"body too large\"}",
+                    false,
+                )
+                .await;
                 return;
             }
 
@@ -122,8 +144,14 @@ async fn serve(sock: &mut TcpSocket<'static>, slot: usize) {
                         .compare_exchange(false, true, Ordering::Relaxed, Ordering::Relaxed)
                         .is_err()
                     {
-                        respond(sock, "503 Service Unavailable", "application/json",
-                            b"{\"ok\":false,\"err\":\"ws busy\"}", false).await;
+                        respond(
+                            sock,
+                            "503 Service Unavailable",
+                            "application/json",
+                            b"{\"ok\":false,\"err\":\"ws busy\"}",
+                            false,
+                        )
+                        .await;
                         // let the 503 segment get ACKed before the task-loop
                         // abort() discards it (RST eats unACKed data)
                         Timer::after_millis(50).await;
@@ -242,7 +270,11 @@ fn hdr_eq(hdr: &[u8], key: &[u8], want: &[u8]) -> bool {
 fn hdr_find<'a>(hdr: &'a [u8], key: &[u8]) -> Option<&'a [u8]> {
     let mut i = 0usize;
     while i < hdr.len() {
-        let eol = hdr[i..].iter().position(|&b| b == b'\n').map(|p| i + p).unwrap_or(hdr.len());
+        let eol = hdr[i..]
+            .iter()
+            .position(|&b| b == b'\n')
+            .map(|p| i + p)
+            .unwrap_or(hdr.len());
         let line = &hdr[i..eol];
         if line.len() > key.len()
             && line[..key.len()].eq_ignore_ascii_case(key)
@@ -255,7 +287,13 @@ fn hdr_find<'a>(hdr: &'a [u8], key: &[u8]) -> Option<&'a [u8]> {
     None
 }
 
-async fn respond(sock: &mut TcpSocket<'static>, status: &str, ctype: &str, body: &[u8], keep: bool) {
+async fn respond(
+    sock: &mut TcpSocket<'static>,
+    status: &str,
+    ctype: &str,
+    body: &[u8],
+    keep: bool,
+) {
     let mut hdr = heapless::String::<192>::new();
     let _ = write!(
         &mut hdr,
@@ -270,7 +308,13 @@ async fn respond(sock: &mut TcpSocket<'static>, status: &str, ctype: &str, body:
     let _ = sock.flush().await;
 }
 
-async fn respond_extra(sock: &mut TcpSocket<'static>, status: &str, ctype: &str, body: &[u8], extra: &str) {
+async fn respond_extra(
+    sock: &mut TcpSocket<'static>,
+    status: &str,
+    ctype: &str,
+    body: &[u8],
+    extra: &str,
+) {
     let mut hdr = heapless::String::<256>::new();
     let _ = write!(
         &mut hdr,
@@ -317,8 +361,14 @@ async fn dispatch(sock: &mut TcpSocket<'static>, method: &str, target: &[u8], bo
     let is_post = method == "POST";
 
     if is_get && path == "/" {
-        respond_extra(sock, "200 OK", "text/html", INDEX_GZ,
-            "Content-Encoding: gzip\r\n").await;
+        respond_extra(
+            sock,
+            "200 OK",
+            "text/html",
+            INDEX_GZ,
+            "Content-Encoding: gzip\r\n",
+        )
+        .await;
         return;
     }
     if is_get && path == "/api/info" {
@@ -391,9 +441,7 @@ async fn dispatch(sock: &mut TcpSocket<'static>, method: &str, target: &[u8], bo
             .try_send(crate::storage::StorageCmd::FileOpen(nb))
             .ok();
         let ok = rpc_wait(seq).await;
-        let size = critical_section::with(|_cs| {
-            crate::storage::FILE_DL.lock(|f| f.borrow().size)
-        });
+        let size = critical_section::with(|_cs| crate::storage::FILE_DL.lock(|f| f.borrow().size));
         if !ok || size == 0 {
             json_err(sock, "400 Bad Request", "invalid file name").await;
             return;
@@ -535,22 +583,42 @@ Content-Disposition: attachment; filename=\"{}\"\r\n\r\n",
 
     // known path wrong method -> 405, else 404
     const KNOWN: [&str; 14] = [
-        "/", "/api/info", "/api/io", "/api/regs", "/api/history",
-        "/api/history/download", "/ws",
-        "/api/do", "/api/reg", "/api/time", "/api/cfg", "/api/save",
-        "/api/reboot", "/api/history/delete",
+        "/",
+        "/api/info",
+        "/api/io",
+        "/api/regs",
+        "/api/history",
+        "/api/history/download",
+        "/ws",
+        "/api/do",
+        "/api/reg",
+        "/api/time",
+        "/api/cfg",
+        "/api/save",
+        "/api/reboot",
+        "/api/history/delete",
     ];
     if KNOWN.contains(&path) {
         json_err(sock, "405 Method Not Allowed", "method not allowed").await;
         return;
     }
-    respond(sock, "404 Not Found", "application/json",
-        b"{\"ok\":false,\"err\":\"not found\"}", true).await;
+    respond(
+        sock,
+        "404 Not Found",
+        "application/json",
+        b"{\"ok\":false,\"err\":\"not found\"}",
+        true,
+    )
+    .await;
 }
 
 fn web_write_do_bit(bit: u16, state: bool) -> bool {
     critical_section::with(|_cs| {
-        REGS.lock(|r| r.borrow_mut().io_write_do_bit(bit, state, &mut Hooks).is_ok())
+        REGS.lock(|r| {
+            r.borrow_mut()
+                .io_write_do_bit(bit, state, &mut Hooks)
+                .is_ok()
+        })
     })
 }
 
@@ -597,11 +665,13 @@ fn web_cmd_cfg(body: &[u8]) -> Option<&'static str> {
         for (i, v) in oct.iter().enumerate() {
             critical_section::with(|_cs| {
                 REGS.lock(|r| {
-                    r.borrow_mut().io_write_holding(
-                        (rm::HOLDING_IP_OCTET1_IDX + i) as u16,
-                        *v as u16,
-                        &mut Hooks,
-                    ).ok();
+                    r.borrow_mut()
+                        .io_write_holding(
+                            (rm::HOLDING_IP_OCTET1_IDX + i) as u16,
+                            *v as u16,
+                            &mut Hooks,
+                        )
+                        .ok();
                 })
             });
         }
@@ -632,7 +702,6 @@ fn web_cmd_cfg(body: &[u8]) -> Option<&'static str> {
     }
     None
 }
-
 
 // ---- WebSocket ----
 
@@ -682,7 +751,11 @@ async fn ws_session(sock: &mut TcpSocket<'static>, pending: &[u8]) {
                     fw_crc: &mut u16| {
         *alive &= parser.feed(data, |p, ev| match ev {
             FeedEvent::Close => *alive = false,
-            FeedEvent::Frame { fin, opcode, payload_len } => {
+            FeedEvent::Frame {
+                fin,
+                opcode,
+                payload_len,
+            } => {
                 if !fin {
                     // fragmented frames unsupported
                     ws_queue_frame(out, 0x8, &[]);
@@ -715,7 +788,7 @@ async fn ws_session(sock: &mut TcpSocket<'static>, pending: &[u8]) {
                         *alive = false;
                     }
                     0x9 => ws_queue_frame(out, 0xA, &p.payload[..payload_len]), // ping->pong
-                    0xA => {} // pong: ignore
+                    0xA => {}                                                   // pong: ignore
                     _ => *alive = false,
                 }
             }
@@ -756,16 +829,22 @@ async fn ws_session(sock: &mut TcpSocket<'static>, pending: &[u8]) {
             embassy_futures::select::Either3::Second(_) => {
                 let mut b = heapless::String::<256>::new();
                 build_io_json(&mut b);
-                let _ = sock.write_all(ws_frame_buf(&mut scratch, b.as_bytes())).await;
+                let _ = sock
+                    .write_all(ws_frame_buf(&mut scratch, b.as_bytes()))
+                    .await;
                 let mut b = heapless::String::<256>::new();
                 build_regs_json(&mut b);
-                let _ = sock.write_all(ws_frame_buf(&mut scratch, b.as_bytes())).await;
+                let _ = sock
+                    .write_all(ws_frame_buf(&mut scratch, b.as_bytes()))
+                    .await;
                 let _ = sock.flush().await;
             }
             embassy_futures::select::Either3::Third(_) => {
                 let mut b = heapless::String::<704>::new();
                 build_info_json(&mut b);
-                let _ = sock.write_all(ws_frame_buf(&mut scratch, b.as_bytes())).await;
+                let _ = sock
+                    .write_all(ws_frame_buf(&mut scratch, b.as_bytes()))
+                    .await;
                 let _ = sock.flush().await;
             }
         }
@@ -778,7 +857,10 @@ async fn ws_session(sock: &mut TcpSocket<'static>, pending: &[u8]) {
 fn ws_handle_cmd(out: &mut heapless::Vec<u8, 768>, payload: &[u8], fw_crc: &mut u16) {
     let cmd = json_get_str(payload, "cmd").unwrap_or(b"");
     if cmd == b"do" {
-        if let (Some(i), Some(v)) = (json_get_i32(payload, "index"), json_get_i32(payload, "value")) {
+        if let (Some(i), Some(v)) = (
+            json_get_i32(payload, "index"),
+            json_get_i32(payload, "value"),
+        ) {
             if (0..8).contains(&i) && web_write_do_bit(i as u16, v != 0) {
                 // do command answers with the fresh full IO snapshot
                 let mut b = heapless::String::<256>::new();
@@ -791,9 +873,20 @@ fn ws_handle_cmd(out: &mut heapless::Vec<u8, 768>, payload: &[u8], fw_crc: &mut 
         return;
     }
     if cmd == b"reg" {
-        if let (Some(a), Some(v)) = (json_get_i32(payload, "addr"), json_get_i32(payload, "value")) {
+        if let (Some(a), Some(v)) = (
+            json_get_i32(payload, "addr"),
+            json_get_i32(payload, "value"),
+        ) {
             let ok = web_cmd_reg(a, v);
-            ws_queue_frame(out, 0x1, if ok { b"{\"ok\":true}" } else { b"{\"ok\":false}" });
+            ws_queue_frame(
+                out,
+                0x1,
+                if ok {
+                    b"{\"ok\":true}"
+                } else {
+                    b"{\"ok\":false}"
+                },
+            );
             return;
         }
         ws_queue_frame(out, 0x1, b"{\"ok\":false}");
@@ -803,7 +896,15 @@ fn ws_handle_cmd(out: &mut heapless::Vec<u8, 768>, payload: &[u8], fw_crc: &mut 
         if let Some(ts) = json_get_i32(payload, "ts") {
             let mut h = Hooks;
             let ok = h.set_timestamp(ts as u32);
-            ws_queue_frame(out, 0x1, if ok { b"{\"ok\":true}" } else { b"{\"ok\":false}" });
+            ws_queue_frame(
+                out,
+                0x1,
+                if ok {
+                    b"{\"ok\":true}"
+                } else {
+                    b"{\"ok\":false}"
+                },
+            );
             return;
         }
         ws_queue_frame(out, 0x1, b"{\"ok\":false}");
@@ -912,12 +1013,14 @@ fn ws_fw_end(fw_crc: &mut u16) -> &'static [u8] {
 // ---- JSON builders ----
 
 fn regs_snapshot() -> RegMap {
-    critical_section::with(|_cs| REGS.lock(|r| {
-        let mut copy = RegMap::new(0);
-        copy.holding = r.borrow().holding;
-        copy.input = r.borrow().input;
-        copy
-    }))
+    critical_section::with(|_cs| {
+        REGS.lock(|r| {
+            let mut copy = RegMap::new(0);
+            copy.holding = r.borrow().holding;
+            copy.input = r.borrow().input;
+            copy
+        })
+    })
 }
 
 fn build_info_json(out: &mut heapless::String<704>) {
@@ -975,7 +1078,12 @@ fn build_io_json(out: &mut heapless::String<256>) {
     }
     let _ = write!(out, "],\"ai\":[");
     for i in 0..rm::AI_NUM {
-        let _ = write!(out, "{}{}", if i > 0 { "," } else { "" }, r.get_input((rm::INPUT_AI0_IDX + i) as u16));
+        let _ = write!(
+            out,
+            "{}{}",
+            if i > 0 { "," } else { "" },
+            r.get_input((rm::INPUT_AI0_IDX + i) as u16)
+        );
     }
     let _ = write!(
         out,
@@ -996,7 +1104,12 @@ fn build_regs_json(out: &mut heapless::String<256>) {
     }
     let _ = write!(out, "],\"input\":[");
     for i in 0..rm::MODBUS_INPUT_REGISTER_NUMBERS {
-        let _ = write!(out, "{}{}", if i > 0 { "," } else { "" }, r.get_input(i as u16));
+        let _ = write!(
+            out,
+            "{}{}",
+            if i > 0 { "," } else { "" },
+            r.get_input(i as u16)
+        );
     }
     let _ = write!(out, "]}}");
 }

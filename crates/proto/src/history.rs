@@ -23,11 +23,21 @@ pub struct HisData {
 
 impl HisData {
     pub fn di(timestamps: u32, di_en: u16, di_value: u16) -> Self {
-        Self { ty: DI_TYPE, timestamps, en_status: di_en, values: [di_value, 0, 0, 0] }
+        Self {
+            ty: DI_TYPE,
+            timestamps,
+            en_status: di_en,
+            values: [di_value, 0, 0, 0],
+        }
     }
 
     pub fn ai(timestamps: u32, ai_en: u16, ai_value: [u16; AI_NUM]) -> Self {
-        Self { ty: AI_TYPE, timestamps, en_status: ai_en, values: ai_value }
+        Self {
+            ty: AI_TYPE,
+            timestamps,
+            en_status: ai_en,
+            values: ai_value,
+        }
     }
 
     pub fn rec_len(&self) -> usize {

@@ -9,24 +9,21 @@ use core::cell::{RefCell, UnsafeCell};
 use core::mem::MaybeUninit;
 use core::sync::atomic::{AtomicBool, Ordering};
 
-use embassy_sync::blocking_mutex::Mutex;
 use embassy_sync::blocking_mutex::raw::{CriticalSectionRawMutex, ThreadModeRawMutex};
+use embassy_sync::blocking_mutex::Mutex;
 use embassy_sync::channel::Channel;
 use generic_array::typenum::consts::{U1024, U32};
 use littlefs2::driver::Storage;
 use littlefs2::fs::{Allocation, File, FileAllocation, Filesystem, OpenOptions};
 use littlefs2::io as lfs_io;
 
-use io_edge_hub_proto::config_store::{
-    self as cs, IoCfg, CFG_SLOT_A, CFG_SLOT_B, CFG_SLOT_SIZE,
-};
+use io_edge_hub_proto::config_store::{self as cs, IoCfg, CFG_SLOT_A, CFG_SLOT_B, CFG_SLOT_SIZE};
 use io_edge_hub_proto::history::{make_hist_name, HisData};
 use io_edge_hub_proto::regmap::{
-    HOLDING_AI_ENABLE_IDX, HOLDING_AI_SAMPLE_MS_IDX, HOLDING_CAN_BAUDRATE_IDX,
+    RegMap, HOLDING_AI_ENABLE_IDX, HOLDING_AI_SAMPLE_MS_IDX, HOLDING_CAN_BAUDRATE_IDX,
     HOLDING_CAN_ID_IDX, HOLDING_DI_ENABLE_IDX, HOLDING_DI_SAMPLE_MS_IDX,
     HOLDING_HISTORY_ENABLE_IDX, HOLDING_IP_OCTET1_IDX, HOLDING_IP_OCTET2_IDX,
-    HOLDING_IP_OCTET3_IDX, HOLDING_IP_OCTET4_IDX, HOLDING_RS485_BAUDRATE_IDX,
-    HOLDING_SLAVE_ID_IDX, RegMap,
+    HOLDING_IP_OCTET3_IDX, HOLDING_IP_OCTET4_IDX, HOLDING_RS485_BAUDRATE_IDX, HOLDING_SLAVE_ID_IDX,
 };
 
 use crate::appstate::REGS;
@@ -70,11 +67,22 @@ pub enum StorageCmd {
     /// FTP RPC: list a directory (result in FTP_LS).
     FtpLs(FtpPath),
     /// FTP RPC: open for sequential read at offset (per-session slot).
-    FtpOpenRead { slot: u8, path: FtpPath, rest: u32 },
+    FtpOpenRead {
+        slot: u8,
+        path: FtpPath,
+        rest: u32,
+    },
     /// FTP RPC: open for write (result in FTP_RES; mode like ftpd.c cmd_stor).
-    FtpOpenWrite { slot: u8, path: FtpPath, mode: FtpWrMode },
+    FtpOpenWrite {
+        slot: u8,
+        path: FtpPath,
+        mode: FtpWrMode,
+    },
     /// FTP RPC: write the slot's staging buffer[..len] to its write handle.
-    FtpWriteChunk { slot: u8, len: usize },
+    FtpWriteChunk {
+        slot: u8,
+        len: usize,
+    },
     /// FTP RPC: close + sync the slot's write handle (result in FTP_RES).
     FtpCloseWrite(u8),
     /// FTP RPC: fill the slot's chunk with the next read block.
@@ -104,7 +112,7 @@ pub static FTP_RES: Mutex<CriticalSectionRawMutex, RefCell<(bool, bool, u32)>> =
 
 /// Directory listing for FTP: 16 entries x [24 name | 4 BE size | 1 type].
 pub static FTP_LS: Mutex<CriticalSectionRawMutex, RefCell<([[u8; 32]; 16], usize)>> =
-    Mutex::new(RefCell::new(([ [0; 32]; 16 ], 0)));
+    Mutex::new(RefCell::new(([[0; 32]; 16], 0)));
 
 /// Root-listing + usage snapshot refreshed on SnapReq. 16 entries x (20 B
 /// NUL-padded name + 4 B BE size): the web JSON is capped at ~13 entries by
@@ -150,7 +158,10 @@ struct AllocCell {
 unsafe impl Sync for AllocCell {}
 impl AllocCell {
     const fn new() -> Self {
-        Self { cell: UnsafeCell::new(MaybeUninit::zeroed()), init: AtomicBool::new(false) }
+        Self {
+            cell: UnsafeCell::new(MaybeUninit::zeroed()),
+            init: AtomicBool::new(false),
+        }
     }
 }
 static FILE_ALLOC: AllocCell = AllocCell::new();
@@ -270,8 +281,8 @@ pub struct FileDl {
     pub err: bool,
 }
 
-pub static FILE_DL: Mutex<CriticalSectionRawMutex, RefCell<FileDl>> = Mutex::new(RefCell::new(
-    FileDl {
+pub static FILE_DL: Mutex<CriticalSectionRawMutex, RefCell<FileDl>> =
+    Mutex::new(RefCell::new(FileDl {
         name: [0; 24],
         size: 0,
         sent: 0,
@@ -280,8 +291,7 @@ pub static FILE_DL: Mutex<CriticalSectionRawMutex, RefCell<FileDl>> = Mutex::new
         open: false,
         eof: false,
         err: false,
-    },
-));
+    }));
 
 /// Generation counter for the web RPCs: bumped once per processed command.
 /// The httpd side snapshots it before sending and polls until it advances —
@@ -293,8 +303,7 @@ pub static RPC_SEQ: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU3
 /// drops CAN frames (3-deep FIFO) and W5500 traffic. Sound because all
 /// callers are embassy tasks in thread mode on the single core — the closure
 /// contains no await — and no ISR touches the NOR.
-pub static NOR: Mutex<ThreadModeRawMutex, RefCell<Option<W25q>>> =
-    Mutex::new(RefCell::new(None));
+pub static NOR: Mutex<ThreadModeRawMutex, RefCell<Option<W25q>>> = Mutex::new(RefCell::new(None));
 
 /// Active config slot/generation.
 pub static CFG: Mutex<CriticalSectionRawMutex, RefCell<(Option<u32>, u32)>> =
@@ -430,12 +439,17 @@ fn cfg_save() {
     let cfg = critical_section::with(|_cs| REGS.lock(|r| regs_to_cfg(&r.borrow())));
     let (slot, gen) = critical_section::with(|_cs| CFG.lock(|c| *c.borrow()));
     let rec = cs::encode_record(&cfg, gen + 1);
-    let tgt = if slot == Some(CFG_SLOT_A) { CFG_SLOT_B } else { CFG_SLOT_A };
-    let ok = nor_with(|w| w.erase(tgt, CFG_SLOT_SIZE).is_ok())
-        .unwrap_or(false)
+    let tgt = if slot == Some(CFG_SLOT_A) {
+        CFG_SLOT_B
+    } else {
+        CFG_SLOT_A
+    };
+    let ok = nor_with(|w| w.erase(tgt, CFG_SLOT_SIZE).is_ok()).unwrap_or(false)
         && nor_with(|w| w.write(tgt, &rec[..cs::CFG_HDR_LEN])).map_or(false, |r| r.is_ok())
-        && nor_with(|w| w.write(tgt + cs::CFG_HDR_LEN as u32, &rec[cs::CFG_HDR_LEN..36])).map_or(false, |r| r.is_ok())
-        && nor_with(|w| w.write(tgt + cs::CFG_CRC_OFF as u32, &rec[36..40])).map_or(false, |r| r.is_ok());
+        && nor_with(|w| w.write(tgt + cs::CFG_HDR_LEN as u32, &rec[cs::CFG_HDR_LEN..36]))
+            .map_or(false, |r| r.is_ok())
+        && nor_with(|w| w.write(tgt + cs::CFG_CRC_OFF as u32, &rec[36..40]))
+            .map_or(false, |r| r.is_ok());
     if ok {
         critical_section::with(|_cs| CFG.lock(|c| *c.borrow_mut() = (Some(tgt), gen + 1)));
         crate::log::inf("cfg: saved");
@@ -454,17 +468,16 @@ struct HistState {
 
 impl HistState {
     const fn new() -> Self {
-        Self { name: [0; 24], name_len: 0 }
+        Self {
+            name: [0; 24],
+            name_len: 0,
+        }
     }
 
     fn set(&mut self, n: &[u8]) {
         // find_latest hands a NUL-padded [u8; 24]: trim at the terminator or
         // the embedded NULs poison path() and the resume becomes a create
-        let l = n
-            .iter()
-            .position(|&b| b == 0)
-            .unwrap_or(n.len())
-            .min(23);
+        let l = n.iter().position(|&b| b == 0).unwrap_or(n.len()).min(23);
         self.name[..l].copy_from_slice(&n[..l]);
         self.name[l] = 0;
         self.name_len = l;
@@ -742,11 +755,7 @@ pub async fn storage_task() {
         crate::stackmark::probe(crate::stackmark::slot::STORAGE);
         // both lanes polled concurrently; when both are ready the executor
         // may pick either, but a full QUEUE can no longer block control cmds
-        let cmd = match embassy_futures::select::select(
-            CTRL_QUEUE.receive(),
-            QUEUE.receive(),
-        )
-        .await
+        let cmd = match embassy_futures::select::select(CTRL_QUEUE.receive(), QUEUE.receive()).await
         {
             embassy_futures::select::Either::First(c) => c,
             embassy_futures::select::Either::Second(c) => c,
@@ -821,9 +830,8 @@ fn handle_cmd(fs: &mut Filesystem<'static, LfsNor>, st: &mut HistState, cmd: Sto
             StorageCmd::FtpOpenRead { slot, path, rest } => {
                 hist_sync(); // flush before RETR exposes the file
                 let ok = ftp_open_read(&mut *fs, slot, path, rest);
-                let size = critical_section::with(|_cs| {
-                    FTP_XFER[slot as usize].lock(|f| f.borrow().size)
-                });
+                let size =
+                    critical_section::with(|_cs| FTP_XFER[slot as usize].lock(|f| f.borrow().size));
                 critical_section::with(|_cs| {
                     FTP_RES.lock(|r| *r.borrow_mut() = (ok, false, size));
                 });
@@ -910,7 +918,11 @@ fn ftp_ls(fs: &mut Filesystem<'_, LfsNor>, path: FtpPath) {
     if let Ok(md) = fs.metadata(p) {
         if !md.is_dir() {
             let b = p.as_str().as_bytes();
-            let base_start = b.iter().rposition(|&c| c == b'/').map(|i| i + 1).unwrap_or(0);
+            let base_start = b
+                .iter()
+                .rposition(|&c| c == b'/')
+                .map(|i| i + 1)
+                .unwrap_or(0);
             let base = &b[base_start..];
             let l = base.len().min(23);
             out.0[0][..l].copy_from_slice(&base[..l]);
@@ -1122,9 +1134,7 @@ fn ftp_write_chunk(slot: u8, len: usize) {
 
 fn ftp_close_write_quiet(slot: u8) -> bool {
     let slot = (slot as usize).min(2);
-    let file = critical_section::with(|_cs| {
-        FTP_XFER[slot].lock(|x| x.borrow_mut().wr.0.take())
-    });
+    let file = critical_section::with(|_cs| FTP_XFER[slot].lock(|x| x.borrow_mut().wr.0.take()));
     match file {
         Some(f) => unsafe { close_or_poison(f) }, // NOR sync outside the cs
         None => true,
@@ -1153,21 +1163,16 @@ fn ftp_read_chunk(_fs: &mut Filesystem<'_, LfsNor>, slot: u8) {
         return;
     }
     if sent >= size {
-        let f = critical_section::with(|_cs| {
-            FTP_XFER[slot].lock(|x| x.borrow_mut().dl.0.take())
-        });
+        let f = critical_section::with(|_cs| FTP_XFER[slot].lock(|x| x.borrow_mut().dl.0.take()));
         if let Some(f) = f {
             unsafe { close_or_poison(f) }; // NOR sync outside the cs
         }
-        critical_section::with(|_cs| {
-            FTP_XFER[slot].lock(|x| x.borrow_mut().eof = true)
-        });
+        critical_section::with(|_cs| FTP_XFER[slot].lock(|x| x.borrow_mut().eof = true));
         return;
     }
     let mut buf = [0u8; 2048];
-    let mut file = critical_section::with(|_cs| {
-        FTP_XFER[slot].lock(|x| x.borrow_mut().dl.0.take())
-    });
+    let mut file =
+        critical_section::with(|_cs| FTP_XFER[slot].lock(|x| x.borrow_mut().dl.0.take()));
     let mut n = 0;
     if let Some(f) = file.as_mut() {
         n = f.read(&mut buf).unwrap_or(0);
@@ -1180,9 +1185,7 @@ fn ftp_read_chunk(_fs: &mut Filesystem<'_, LfsNor>, slot: u8) {
         });
     }
     if n == 0 {
-        let f = critical_section::with(|_cs| {
-            FTP_XFER[slot].lock(|x| x.borrow_mut().dl.0.take())
-        });
+        let f = critical_section::with(|_cs| FTP_XFER[slot].lock(|x| x.borrow_mut().dl.0.take()));
         if let Some(f) = f {
             unsafe { close_or_poison(f) };
         }
@@ -1228,7 +1231,6 @@ fn ftp_rename(fs: &mut Filesystem<'_, LfsNor>, from: &FtpPath, to: &FtpPath) -> 
         _ => false,
     }
 }
-
 
 /// Path bytes -> &Path: slice to the first NUL (names arrive as [u8; 24]
 /// fixed buffers; from_bytes_with_nul demands NUL be the last byte).
@@ -1287,9 +1289,7 @@ fn fs_snapshot(fs: &mut Filesystem<'_, LfsNor>) -> bool {
 /// Open a data_*.raw for chunked download: opens once, FileChunk reads
 /// continue sequentially from the handle.
 fn file_open(fs: &mut Filesystem<'_, LfsNor>, name: &[u8; 24]) -> bool {
-    let stale = critical_section::with(|_cs| {
-        DOWNLOAD_FILE.lock(|d| d.borrow_mut().0.take())
-    });
+    let stale = critical_section::with(|_cs| DOWNLOAD_FILE.lock(|d| d.borrow_mut().0.take()));
     if let Some(f) = stale {
         unsafe { close_or_poison(f) };
     }
@@ -1326,9 +1326,7 @@ fn file_open(fs: &mut Filesystem<'_, LfsNor>, name: &[u8; 24]) -> bool {
                     g.open = true;
                 })
             });
-            critical_section::with(|_cs| {
-                DOWNLOAD_FILE.lock(|d| d.borrow_mut().0 = Some(file))
-            });
+            critical_section::with(|_cs| DOWNLOAD_FILE.lock(|d| d.borrow_mut().0 = Some(file)));
             true
         }
         Err(_) => false,
@@ -1347,12 +1345,8 @@ fn file_chunk(_fs: &mut Filesystem<'_, LfsNor>) -> bool {
         return true;
     }
     if sent >= size {
-        critical_section::with(|_cs| {
-            FILE_DL.lock(|f| f.borrow_mut().eof = true)
-        });
-        let f = critical_section::with(|_cs| {
-            DOWNLOAD_FILE.lock(|d| d.borrow_mut().0.take())
-        });
+        critical_section::with(|_cs| FILE_DL.lock(|f| f.borrow_mut().eof = true));
+        let f = critical_section::with(|_cs| DOWNLOAD_FILE.lock(|d| d.borrow_mut().0.take()));
         if let Some(f) = f {
             unsafe { close_or_poison(f) };
         }
@@ -1361,9 +1355,7 @@ fn file_chunk(_fs: &mut Filesystem<'_, LfsNor>) -> bool {
     // littlefs read runs with the handle taken OUT of the critical section —
     // a read touches NOR for ~ms and must not mask interrupts (CAN frames!)
     let mut buf = [0u8; 2048];
-    let mut file = critical_section::with(|_cs| {
-        DOWNLOAD_FILE.lock(|d| d.borrow_mut().0.take())
-    });
+    let mut file = critical_section::with(|_cs| DOWNLOAD_FILE.lock(|d| d.borrow_mut().0.take()));
     let mut n = 0;
     if let Some(f) = file.as_mut() {
         n = f.read(&mut buf).unwrap_or(0);
@@ -1380,9 +1372,7 @@ fn file_chunk(_fs: &mut Filesystem<'_, LfsNor>) -> bool {
         });
         return false;
     }
-    critical_section::with(|_cs| {
-        DOWNLOAD_FILE.lock(|d| d.borrow_mut().0 = file)
-    });
+    critical_section::with(|_cs| DOWNLOAD_FILE.lock(|d| d.borrow_mut().0 = file));
     critical_section::with(|_cs| {
         FILE_DL.lock(|f| {
             let mut g = f.borrow_mut();
@@ -1402,9 +1392,7 @@ fn file_chunk(_fs: &mut Filesystem<'_, LfsNor>) -> bool {
         })
     });
     if done {
-        let f = critical_section::with(|_cs| {
-            DOWNLOAD_FILE.lock(|d| d.borrow_mut().0.take())
-        });
+        let f = critical_section::with(|_cs| DOWNLOAD_FILE.lock(|d| d.borrow_mut().0.take()));
         if let Some(f) = f {
             unsafe { close_or_poison(f) };
         }
@@ -1416,12 +1404,10 @@ fn cfg_erase_all() {
     let ok = nor_with(|w| w.erase(CFG_SLOT_A, CFG_SLOT_SIZE)).map_or(false, |r| r.is_ok())
         && nor_with(|w| w.erase(CFG_SLOT_B, CFG_SLOT_SIZE)).map_or(false, |r| r.is_ok());
     if ok {
-            critical_section::with(|_cs| CFG.lock(|c| *c.borrow_mut() = (None, 0)));
-            let d = IoCfg::defaults();
-            critical_section::with(|_cs| {
-                REGS.lock(|r| apply_cfg_to_regs(&mut r.borrow_mut(), &d))
-            });
-            crate::log::inf("cfg: factory erase done");
+        critical_section::with(|_cs| CFG.lock(|c| *c.borrow_mut() = (None, 0)));
+        let d = IoCfg::defaults();
+        critical_section::with(|_cs| REGS.lock(|r| apply_cfg_to_regs(&mut r.borrow_mut(), &d)));
+        crate::log::inf("cfg: factory erase done");
     } else {
         crate::log::err("cfg: erase failed");
     }

@@ -7,7 +7,7 @@ use embassy_net::Stack;
 use embassy_time::{Duration, Instant, Timer};
 use embedded_io_async::Write as _;
 
-use io_edge_hub_proto::mbtcp_adu::{MBTCP_ADU_TX_MAX, mbtcp_adu_process};
+use io_edge_hub_proto::mbtcp_adu::{mbtcp_adu_process, MBTCP_ADU_TX_MAX};
 
 use crate::appstate::{Hooks, MB_SERVER, REGS};
 
@@ -52,7 +52,11 @@ pub async fn conn_task(
 /// the load dropping — a lingering listener steals the next legit client
 /// (the FTP rejector had the same latch bug).
 #[embassy_executor::task]
-pub async fn reject_task(stack: Stack<'static>, rx_buf: &'static mut [u8; 64], tx_buf: &'static mut [u8; 64]) {
+pub async fn reject_task(
+    stack: Stack<'static>,
+    rx_buf: &'static mut [u8; 64],
+    tx_buf: &'static mut [u8; 64],
+) {
     use embassy_futures::select::{select, Either};
     let mut sock = TcpSocket::new(stack, rx_buf, tx_buf);
     sock.set_timeout(Some(Duration::from_secs(5)));

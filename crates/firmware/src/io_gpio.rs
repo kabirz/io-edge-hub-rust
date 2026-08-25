@@ -3,15 +3,17 @@
 use core::cell::RefCell;
 
 use embassy_stm32::gpio::Output;
-use embassy_sync::blocking_mutex::Mutex;
 use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
+use embassy_sync::blocking_mutex::Mutex;
 
 type Outs = [Option<Output<'static>>; 8];
 
-static DO: Mutex<CriticalSectionRawMutex, RefCell<Outs>> =
-    Mutex::new(RefCell::new([None, None, None, None, None, None, None, None]));
-static LED: Mutex<CriticalSectionRawMutex, RefCell<Outs>> =
-    Mutex::new(RefCell::new([None, None, None, None, None, None, None, None]));
+static DO: Mutex<CriticalSectionRawMutex, RefCell<Outs>> = Mutex::new(RefCell::new([
+    None, None, None, None, None, None, None, None,
+]));
+static LED: Mutex<CriticalSectionRawMutex, RefCell<Outs>> = Mutex::new(RefCell::new([
+    None, None, None, None, None, None, None, None,
+]));
 
 pub fn init(do_outs: Outs, led_outs: Outs) {
     critical_section::with(|_cs| {

@@ -86,7 +86,13 @@ mod tests {
 
     #[test]
     fn roundtrip() {
-        for &ts in &[TS_MIN, 1_577_836_800, 1_787_184_000, 2_145_916_800, TS_MAX - 1] {
+        for &ts in &[
+            TS_MIN,
+            1_577_836_800,
+            1_787_184_000,
+            2_145_916_800,
+            TS_MAX - 1,
+        ] {
             assert_eq!(civil_to_unix(&unix_to_civil(ts)), ts);
         }
     }

@@ -10,7 +10,7 @@ use static_cell::StaticCell;
 
 use io_edge_hub_proto::mb_server::MB_SERVER_PDU_MAX;
 use io_edge_hub_proto::regmap::{HOLDING_RS485_BAUDRATE_IDX, HOLDING_SLAVE_ID_IDX};
-use io_edge_hub_proto::rtu_frame::{RtuFrame, rtu_t35_ms};
+use io_edge_hub_proto::rtu_frame::{rtu_t35_ms, RtuFrame};
 
 use crate::appstate::{Hooks, MB_SERVER, REGS};
 
@@ -52,7 +52,11 @@ pub async fn rtu_task(p: RtuPins) {
         .expect("usart2 cfg");
     let (mut tx, mut rx) = uart.split();
     // F4 (usart_v1) has no driver-managed DE: drive PA1 manually
-    let mut de = embassy_stm32::gpio::Output::new(p.de, embassy_stm32::gpio::Level::Low, embassy_stm32::gpio::Speed::Low);
+    let mut de = embassy_stm32::gpio::Output::new(
+        p.de,
+        embassy_stm32::gpio::Level::Low,
+        embassy_stm32::gpio::Speed::Low,
+    );
 
     static RTU: StaticCell<RtuFrame> = StaticCell::new();
     let rtu = RTU.init(RtuFrame::new());
@@ -75,7 +79,12 @@ pub async fn rtu_task(p: RtuPins) {
             let reply = REGS.lock(|r| {
                 MB_SERVER.lock(|s| {
                     let mut h = Hooks;
-                    rtu.t35_expired(&mut s.borrow_mut(), &mut r.borrow_mut(), &mut h, &mut tx_frame)
+                    rtu.t35_expired(
+                        &mut s.borrow_mut(),
+                        &mut r.borrow_mut(),
+                        &mut h,
+                        &mut tx_frame,
+                    )
                 })
             });
             if let Some(len) = reply {
