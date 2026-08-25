@@ -556,6 +556,72 @@ bool CanManager_GetVersion(CanManager *m, char *out_ver, int out_cap)
 }
 
 /* ================================================================
+ * keyhash 查询 (0x101 cmd=4 → 0x102 code=7, arg=32 + 5 帧 0x105)
+ *
+ * 帧 [seq][≤7B 原始字节], 定位 seq*7 (无 NUL 截断问题, 二进制安全)。
+ * 与 GET_VERSION 的 0x105 用途一致: 设备→主机的分片数据帧。
+ * ================================================================ */
+
+bool CanManager_GetKeyhash(CanManager *m, uint8_t out_keyhash[32])
+{
+	if (!m || !m->connected) {
+		if (m) sprintf(m->last_error, "CAN 未连接");
+		return false;
+	}
+	if (!out_keyhash) return false;
+
+	uint8_t fr[8] = {0};
+	fr[0] = IO_FW_CMD_KEYHASH;
+	if (!can_write(m, CAN_ID_IO_CMD, fr, 8)) {
+		return false;
+	}
+
+	uint32_t code = 0, total_len = 0;
+	if (!can_read_resp(m, CAN_ID_IO_RESP, 2000, &code, &total_len)) {
+		return false;
+	}
+	if (code != IO_FW_CODE_KEYHASH) {
+		sprintf(m->last_error, "KEYHASH 意外回复 code=%u (旧固件无此命令)", code);
+		return false;
+	}
+	if (total_len != 32) {
+		sprintf(m->last_error, "KEYHASH 长度异常 %u", total_len);
+		return false;
+	}
+
+	/* 5 帧 0x105: [seq][≤7B], 定位 seq*7; 2s 窗口内收齐 */
+	uint8_t got[5] = {0};
+	memset(out_keyhash, 0, 32);
+	DWORD end = GetTickCount() + 2000;
+	for (;;) {
+		bool all = true;
+		for (int i = 0; i < 5; i++) {
+			if (!got[i]) { all = false; break; }
+		}
+		if (all) return true;
+		if ((long)(end - GetTickCount()) <= 0) break;
+
+		TPCANMsg msg;
+		TPCANTimestampMsg ts;
+		TPCANStatus st = Pcan_Read(m->channel, &msg, &ts);
+		if (st == PCAN_ERROR_OK && msg.id == CAN_ID_IO_VERSION && msg.len >= 1) {
+			uint8_t seq = msg.data[0];
+			if (seq < 5 && !got[seq]) {
+				uint8_t n = msg.len - 1;
+				if (n > 7) n = 7;
+				if (seq * 7 + n > 32) n = (uint8_t)(32 - seq * 7);
+				memcpy(out_keyhash + seq * 7, msg.data + 1, n);
+				got[seq] = 1;
+				continue;
+			}
+		}
+		Sleep(1);
+	}
+	sprintf(m->last_error, "KEYHASH 分片未收齐");
+	return false;
+}
+
+/* ================================================================
  * 重启 (0x101 cmd=3)
  *
  * 固件 sys_reboot(SYS_REBOOT_WARM) 立即执行, 不发回复 → 不等待.

@@ -628,15 +628,19 @@ static DWORD WINAPI can_upgrade_thread(LPVOID arg)
 	(void)arg;
 	post_log(L"CAN 升级开始");
 
-	/* CAN 通道无 IP, 不能走 UDP 0x15: keyhash 优先 exe 旁 ed25519.keyhash
-	 * 文件 (tools/gen_ed25519.py 产物, 换钥匙时拷贝过来), 退回内置常量 */
+	/* keyhash 优先设备自报 (CAN 0x101 cmd=4, 与 UDP 0x15 / 网页 /api/info
+	 * 对齐, 换钥匙零同步); 旧固件无此命令时退回 exe 旁 ed25519.keyhash
+	 * 文件, 最后退回内置常量 (过渡固件轮换场景仍可用) */
 	uint8_t kh_buf[32];
 	const uint8_t *kh = fw_image_keyhash();
-	if (fw_image_keyhash_load_file(kh_buf)) {
+	if (CanManager_GetKeyhash(g_upg.can, kh_buf)) {
+		kh = kh_buf;
+		post_log(L"keyhash: 设备自报 (CAN 0x101 cmd=4)");
+	} else if (fw_image_keyhash_load_file(kh_buf)) {
 		kh = kh_buf;
 		post_log(L"keyhash: ed25519.keyhash (exe 同目录)");
 	} else {
-		post_log(L"keyhash: 内置常量 (exe 旁无 ed25519.keyhash)");
+		post_log(L"keyhash: 内置常量");
 	}
 	bool permanent = g_upg.cur_permanent; /* true=永久 */
 

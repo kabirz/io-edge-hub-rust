@@ -42,6 +42,7 @@ const CMD_START_UPDATE: u32 = 0;
 const CMD_CONFIRM: u32 = 1;
 const CMD_VERSION: u32 = 2;
 const CMD_REBOOT: u32 = 3;
+const CMD_KEYHASH: u32 = 4;
 
 // 0x102 reply codes (data LE32)
 const CODE_OFFSET: u32 = 0;
@@ -51,6 +52,7 @@ const CODE_CONFIRM: u32 = 3;
 const CODE_FLASH_ERROR: u32 = 4;
 const CODE_TRANSFER_ERROR: u32 = 5;
 const CODE_KEYHASH_ERROR: u32 = 6;
+const CODE_KEYHASH: u32 = 7;
 
 const CONFIRM_MAGIC: u32 = 0x55AA_55AA;
 
@@ -241,6 +243,18 @@ async fn handle_platform(
                 send(tx, VERSION_TX, &d).await;
                 off += chunk;
                 seq += 1;
+            }
+        }
+        // GET_KEYHASH: 回 [CODE_KEYHASH, 32] 后用 0x105 分片 (seq + ≤7B 原始
+        // 字节, 定位 seq*7) 发出 32B 指纹 —— CAN 上位机升级前向设备自报取
+        // keyhash, 与 UDP 0x15 / /api/info 对齐, 换钥匙零同步
+        CMD_KEYHASH => {
+            fw_reply(tx, CODE_KEYHASH, upg::FW_KEYHASH_LEN as u32).await;
+            for (seq, chunk) in upg::FW_KEYHASH.chunks(7).enumerate() {
+                let mut d = [0u8; 8];
+                d[0] = seq as u8;
+                d[1..1 + chunk.len()].copy_from_slice(chunk);
+                send(tx, VERSION_TX, &d[..1 + chunk.len()]).await;
             }
         }
         CMD_REBOOT => {

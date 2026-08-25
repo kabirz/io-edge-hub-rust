@@ -41,12 +41,14 @@ target_link_libraries(${PROJECT_NAME} PRIVATE
     setupapi
 )
 
-# 在线协议自测 (控制台): 与 GUI 同一份协议源码 (udp_manager/fw_image),
+# 在线协议自测 (控制台): 与 GUI 同一份协议源码 (udp_manager/fw_image/can),
 # 跑 GUI 的完整调用序列, 便于改协议后随时回归. 用法见 tests/protocol_test.c 头注.
 add_executable(protocol_test
     tests/protocol_test.c
     src/udp_manager.c
     src/fw_image.c
+    src/can_manager.c
+    src/pcan_loader.c
 )
 
 target_compile_definitions(protocol_test PRIVATE _CRT_SECURE_NO_WARNINGS)

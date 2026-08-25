@@ -25,6 +25,7 @@ enum io_fw_cmd {
 	IO_FW_CMD_CONFIRM,
 	IO_FW_CMD_VERSION,
 	IO_FW_CMD_REBOOT,
+	IO_FW_CMD_KEYHASH,            /* 设备自报 keyhash (embassy-boot 固件) */
 };
 
 /* 固件升级回复码 (0x102 data_32[0]) */
@@ -36,6 +37,7 @@ enum io_fw_code {
 	IO_FW_CODE_FLASH_ERROR,
 	IO_FW_CODE_TRANSFER_ERROR,
 	IO_FW_CODE_KEYHASH_ERROR,
+	IO_FW_CODE_KEYHASH,           /* keyhash 查询: arg=32, 后续 5 帧 0x105 分片 */
 };
 
 /* CONFIRM 成功标志 (0x102 data_32[1]) */
@@ -88,6 +90,11 @@ bool CanManager_EnterBoot(CanManager *m);
 /* 查询版本字符串 (0x101 cmd=2 → 0x102 code=2 + 0x105 分片拼接).
  * 成功 true, out_ver 填 NUL 终止串. */
 bool CanManager_GetVersion(CanManager *m, char *out_ver, int out_cap);
+
+/* 查询设备 keyhash (0x101 cmd=4 → 0x102 code=7,arg=32 + 5 帧 0x105 分片,
+ * 帧 [seq][≤7B 原始字节] 定位 seq*7)。升级前向设备自报取指纹 —— 换签名
+ * 钥匙只改固件, 本工具无需跟改。成功 true, out_keyhash 填 32B。 */
+bool CanManager_GetKeyhash(CanManager *m, uint8_t out_keyhash[32]);
 
 /* 重启 (0x101 cmd=3), 设备收到即重启, 回复不可靠 → 不强求回复. */
 bool CanManager_Reboot(CanManager *m);

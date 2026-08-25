@@ -15,8 +15,11 @@
 #include <windows.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <string.h>
 #include "udp_manager.h"
 #include "fw_image.h"
+#include "can_manager.h"
+#include "pcan_loader.h"
 
 /* 进度回调: ud 传总长度 */
 static void prog(uint32_t off, void *ud)
@@ -26,10 +29,64 @@ static void prog(uint32_t off, void *ud)
     fflush(stdout);
 }
 
+/* CAN 通道自测: 探测 PCAN → 连接 → GET_VERSION + GET_KEYHASH(cmd=4)。
+ * 用法: protocol_test.exe --can [bitrate_kbps] (默认 250) */
+static int can_probe(const char *baud_arg)
+{
+    uint32_t bitrate = PCAN_BAUD_250K;
+    if (baud_arg) {
+        int kbps = atoi(baud_arg);
+        if (kbps == 500) bitrate = PCAN_BAUD_500K;
+        else if (kbps == 125) bitrate = PCAN_BAUD_125K;
+        else if (kbps == 100) bitrate = PCAN_BAUD_100K;
+        else if (kbps == 50) bitrate = PCAN_BAUD_50K;
+        else if (kbps == 1000) bitrate = PCAN_BAUD_1M;
+    }
+    CanManager *can = CanManager_Create();
+    char names[16][32];
+    int channels[16];
+    int cnt = CanManager_DetectDevices(can, names, channels, 16);
+    if (cnt <= 0) {
+        printf("PCAN detect: none (%s)\n", CanManager_GetLastError(can));
+        return 1;
+    }
+    printf("PCAN detect: %d device(s), using %s @ %uk\n",
+           cnt, names[0], baud_arg ? (unsigned)atoi(baud_arg) : 250u);
+    if (!CanManager_Connect(can, channels[0], bitrate)) {
+        printf("PCAN connect failed: %s\n", CanManager_GetLastError(can));
+        return 1;
+    }
+    char ver[80] = {0};
+    if (CanManager_GetVersion(can, ver, sizeof(ver))) {
+        printf("CAN GET_VERSION: %s\n", ver);
+    } else {
+        printf("CAN GET_VERSION failed: %s\n", CanManager_GetLastError(can));
+    }
+    uint8_t kh[32];
+    if (CanManager_GetKeyhash(can, kh)) {
+        printf("CAN GET_KEYHASH (0x101 cmd=4): ");
+        for (int i = 0; i < 32; i++) printf("%02x", kh[i]);
+        printf("\n");
+        const uint8_t *baked = fw_image_keyhash();
+        printf("matches baked constant: %s\n",
+               memcmp(kh, baked, 32) == 0 ? "YES" : "NO (rotated key?)");
+        CanManager_Disconnect(can);
+        return 0;
+    }
+    printf("CAN GET_KEYHASH failed: %s\n", CanManager_GetLastError(can));
+    CanManager_Disconnect(can);
+    return 1;
+}
+
 int main(int argc, char **argv)
 {
+    if (argc >= 2 && strcmp(argv[1], "--can") == 0) {
+        return can_probe(argc >= 3 ? argv[2] : NULL);
+    }
     if (argc < 3) {
-        printf("usage: %s <ip> <app.dfu.bin>\n", argv[0]);
+        printf("usage: %s <ip> <app.dfu.bin>\n"
+               "       %s --can [bitrate_kbps]   (PCAN detect + keyhash)\n",
+               argv[0], argv[0]);
         return 1;
     }
     const char *ip = argv[1];
