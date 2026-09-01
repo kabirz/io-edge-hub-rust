@@ -2,10 +2,8 @@
 #![no_main]
 
 mod appstate;
-mod ftpd;
 mod fw;
 mod fw_can;
-mod httpd;
 mod io_gpio;
 mod log;
 mod mbtcp;
@@ -19,6 +17,7 @@ mod storage;
 mod systime;
 mod uart_raw;
 mod w25q;
+mod w5500;
 
 use embassy_executor::Spawner;
 use embassy_stm32::gpio::{Level, Output, Speed};
@@ -163,165 +162,25 @@ async fn main(spawner: Spawner) {
 
     spawner.spawn(crate::storage::storage_task().expect("spawn storage"));
 
-    // heartbeat: LED PE7, IWDG 30s fed every 3s, delayed reboot
-    // (spawned after net setup: netmon needs the stack handle)
-    let led = Output::new(dp.PE7, Level::High, Speed::Low);
-    let wdt = IndependentWatchdog::new(dp.IWDG, 30_000_000);
-
-    // W5500 MACRAW + embassy-net + UDP :8600
-    let stack = net::setup(
-        &spawner,
-        net::NetPins {
+    // W5500 hardware TCP/IP stack (this branch): UDP :8600 config/upgrade +
+    // Modbus TCP :502 on chip sockets; HTTP/FTP dropped with the smoltcp
+    // stack. PD1 (INT) unused — the net task polls at 2ms.
+    spawner.spawn(
+        net::net_task(w5500::W5500Pins {
             spi2: dp.SPI2,
             sck: dp.PB13,
             miso: dp.PB14,
             mosi: dp.PB15,
             cs: dp.PB12,
-            int: dp.PD1,
             rst: dp.PD0,
-            tx_dma: dp.DMA1_CH4,
-            rx_dma: dp.DMA1_CH3,
-        },
-    )
-    .await;
-    log::inf("net: W5500 up, udp 8600");
-    spawner.spawn(heartbeat(wdt, led, *stack).expect("spawn hb"));
+        })
+        .expect("spawn net"),
+    );
 
-    // Modbus TCP :502: 2 serving sockets (3rd client finds no listener -> RST,
-    // same cap as the C firmware); per-instance buffers from distinct statics
-    #[link_section = ".ccm.bss"]
-    static MB_RX1: static_cell::StaticCell<[u8; 512]> = static_cell::StaticCell::new();
-    #[link_section = ".ccm.bss"]
-    static MB_TX1: static_cell::StaticCell<[u8; 512]> = static_cell::StaticCell::new();
-    #[link_section = ".ccm.bss"]
-    static MB_RX2: static_cell::StaticCell<[u8; 512]> = static_cell::StaticCell::new();
-    #[link_section = ".ccm.bss"]
-    static MB_TX2: static_cell::StaticCell<[u8; 512]> = static_cell::StaticCell::new();
-    spawner.spawn(
-        mbtcp::conn_task(
-            *stack,
-            "mbtcp1",
-            MB_RX1.init([0u8; 512]),
-            MB_TX1.init([0u8; 512]),
-        )
-        .expect("spawn mbtcp1"),
-    );
-    spawner.spawn(
-        mbtcp::conn_task(
-            *stack,
-            "mbtcp2",
-            MB_RX2.init([0u8; 512]),
-            MB_TX2.init([0u8; 512]),
-        )
-        .expect("spawn mbtcp2"),
-    );
-    // 3rd listener accepts-then-aborts the excess master
-    static RJ_RX: static_cell::StaticCell<[u8; 64]> = static_cell::StaticCell::new();
-    static RJ_TX: static_cell::StaticCell<[u8; 64]> = static_cell::StaticCell::new();
-    spawner.spawn(
-        mbtcp::reject_task(*stack, RJ_RX.init([0u8; 64]), RJ_TX.init([0u8; 64]))
-            .expect("spawn mbreject"),
-    );
-    log::inf("mbtcp: port 502 listening");
-
-    // HTTP :80 (2 connections, httpd.c cap); per-instance socket buffers
-    // (CPU-only smoltcp storage -> CCRAM)
-    #[link_section = ".ccm.bss"]
-    static HTTP_RX1: static_cell::StaticCell<[u8; 640]> = static_cell::StaticCell::new();
-    #[link_section = ".ccm.bss"]
-    static HTTP_TX1: static_cell::StaticCell<[u8; 2048]> = static_cell::StaticCell::new();
-    #[link_section = ".ccm.bss"]
-    static HTTP_RX2: static_cell::StaticCell<[u8; 640]> = static_cell::StaticCell::new();
-    #[link_section = ".ccm.bss"]
-    static HTTP_TX2: static_cell::StaticCell<[u8; 2048]> = static_cell::StaticCell::new();
-    spawner.spawn(
-        httpd::http_task(
-            *stack,
-            "http1",
-            HTTP_RX1.init([0u8; 640]),
-            HTTP_TX1.init([0u8; 2048]),
-        )
-        .expect("spawn http1"),
-    );
-    spawner.spawn(
-        httpd::http_task(
-            *stack,
-            "http2",
-            HTTP_RX2.init([0u8; 640]),
-            HTTP_TX2.init([0u8; 2048]),
-        )
-        .expect("spawn http2"),
-    );
-    log::inf("httpd: port 80 listening");
-
-    // FTP :21 (3 sessions + 421 rejector, ftpd.c cap); the socket buffers
-    // are CPU-only smoltcp storage -> CCRAM (main RAM is scarce)
-    #[link_section = ".ccm.bss"]
-    static FR1: static_cell::StaticCell<[u8; 1024]> = static_cell::StaticCell::new();
-    #[link_section = ".ccm.bss"]
-    static FT1: static_cell::StaticCell<[u8; 1024]> = static_cell::StaticCell::new();
-    #[link_section = ".ccm.bss"]
-    static FDR1: static_cell::StaticCell<[u8; 2048]> = static_cell::StaticCell::new();
-    #[link_section = ".ccm.bss"]
-    static FDT1: static_cell::StaticCell<[u8; 2048]> = static_cell::StaticCell::new();
-    #[link_section = ".ccm.bss"]
-    static FR2: static_cell::StaticCell<[u8; 1024]> = static_cell::StaticCell::new();
-    #[link_section = ".ccm.bss"]
-    static FT2: static_cell::StaticCell<[u8; 1024]> = static_cell::StaticCell::new();
-    #[link_section = ".ccm.bss"]
-    static FDR2: static_cell::StaticCell<[u8; 2048]> = static_cell::StaticCell::new();
-    #[link_section = ".ccm.bss"]
-    static FDT2: static_cell::StaticCell<[u8; 2048]> = static_cell::StaticCell::new();
-    #[link_section = ".ccm.bss"]
-    static FR3: static_cell::StaticCell<[u8; 1024]> = static_cell::StaticCell::new();
-    #[link_section = ".ccm.bss"]
-    static FT3: static_cell::StaticCell<[u8; 1024]> = static_cell::StaticCell::new();
-    #[link_section = ".ccm.bss"]
-    static FDR3: static_cell::StaticCell<[u8; 2048]> = static_cell::StaticCell::new();
-    #[link_section = ".ccm.bss"]
-    static FDT3: static_cell::StaticCell<[u8; 2048]> = static_cell::StaticCell::new();
-    #[link_section = ".ccm.bss"]
-    static FRJ: static_cell::StaticCell<[u8; 128]> = static_cell::StaticCell::new();
-    #[link_section = ".ccm.bss"]
-    static FTJ: static_cell::StaticCell<[u8; 128]> = static_cell::StaticCell::new();
-    spawner.spawn(
-        ftpd::ftp_task(
-            *stack,
-            0,
-            FR1.init([0u8; 1024]),
-            FT1.init([0u8; 1024]),
-            FDR1.init([0u8; 2048]),
-            FDT1.init([0u8; 2048]),
-        )
-        .expect("spawn ftp1"),
-    );
-    spawner.spawn(
-        ftpd::ftp_task(
-            *stack,
-            1,
-            FR2.init([0u8; 1024]),
-            FT2.init([0u8; 1024]),
-            FDR2.init([0u8; 2048]),
-            FDT2.init([0u8; 2048]),
-        )
-        .expect("spawn ftp2"),
-    );
-    spawner.spawn(
-        ftpd::ftp_task(
-            *stack,
-            2,
-            FR3.init([0u8; 1024]),
-            FT3.init([0u8; 1024]),
-            FDR3.init([0u8; 2048]),
-            FDT3.init([0u8; 2048]),
-        )
-        .expect("spawn ftp3"),
-    );
-    spawner.spawn(
-        ftpd::ftp_reject_task(*stack, FRJ.init([0u8; 128]), FTJ.init([0u8; 128]))
-            .expect("spawn ftprej"),
-    );
-    log::inf("ftp: port 21 listening");
+    // heartbeat: LED PE7, IWDG 30s fed every 3s, delayed reboot
+    let led = Output::new(dp.PE7, Level::High, Speed::Low);
+    let wdt = IndependentWatchdog::new(dp.IWDG, 30_000_000);
+    spawner.spawn(heartbeat(wdt, led).expect("spawn hb"));
 
     // Modbus RTU on USART2 + DE PA1 (baud/slave snapshot from cfg)
     spawner.spawn(
@@ -381,7 +240,6 @@ async fn main(spawner: Spawner) {
 async fn heartbeat(
     mut wdt: IndependentWatchdog<'static, embassy_stm32::peripherals::IWDG>,
     mut led: Output<'static>,
-    stack: embassy_net::Stack<'static>,
 ) {
     wdt.unleash();
     let mut ticker = Ticker::every(Duration::from_millis(100));
@@ -409,10 +267,10 @@ async fn heartbeat(
         if ticks % 30 == 0 {
             wdt.pet();
         }
-        // netmon: 500ms link poll; link down -> DO all off
+        // netmon: 500ms; LINK_UP refreshed by the net task's PHY poll;
+        // link down -> DO all off
         if ticks % 5 == 0 {
-            let up = stack.is_link_up();
-            critical_section::with(|_cs| crate::net::LINK_UP.lock(|b| *b.borrow_mut() = up));
+            let up = crate::net::net_link_up();
             if !up {
                 critical_section::with(|_cs| {
                     crate::appstate::REGS.lock(|r| {

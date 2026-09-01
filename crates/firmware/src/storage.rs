@@ -46,6 +46,10 @@ pub static QUEUE: StorageQueue = Channel::new();
 /// already acknowledged ("parameters saved" then lost on reboot).
 pub static CTRL_QUEUE: Channel<CriticalSectionRawMutex, StorageCmd, 4> = Channel::new();
 
+// On the w5500-toe branch the HTTP/FTP consumers are gone; the RPC surface
+// stays so the shell/debug tools (udp 0xFC uses FILE_DL) keep working and
+// the servers can come back unchanged.
+#[allow(dead_code)]
 pub enum StorageCmd {
     Write(HisData),
     /// Close the current file but keep its name: next write continues it
@@ -55,6 +59,7 @@ pub enum StorageCmd {
     CfgSave,
     CfgEraseAll,
     /// Web RPC: refresh FS_SNAP (root listing + usage) from littlefs.
+    #[allow(dead_code)]
     SnapReq,
     /// Web RPC: delete one data_*.raw by name.
     Del([u8; 24]),
@@ -99,6 +104,7 @@ pub enum StorageCmd {
 pub type FtpPath = [u8; 96];
 
 #[derive(Debug, Clone, Copy)]
+#[allow(dead_code)] // Rest/Append were ftpd.c REST/APPE modes (w5500-toe: no FTP)
 pub enum FtpWrMode {
     Trunc,
     Append,
@@ -122,6 +128,7 @@ pub struct FsSnap {
     pub entries: [[u8; 24]; 16],
     pub count: usize,
     pub free: u32,
+    #[allow(dead_code)] // was read by the HTTP info JSON (w5500-toe: no HTTP)
     pub total: u32,
     pub gen: u32,
 }

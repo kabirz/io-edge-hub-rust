@@ -1,142 +1,149 @@
-//! Modbus TCP server on :502: max 2 concurrent masters, the 3rd connection
-//! is accepted then aborted. Diagnostics are shared with RTU through the
-//! global MbServer.
+//! Modbus TCP on W5500 hardware sockets 1/2: max 2 concurrent masters, the
+//! 3rd connection finds no free listener and the chip's TCP engine answers
+//! RST (the same cap and client-visible behavior as the C firmware's
+//! accept-then-abort rejector, without needing one). Diagnostics are shared
+//! with RTU through the global MbServer.
+//!
+//! MbSock is polled by net_task (the W5500 is not shared across tasks):
+//! drain RX -> accumulate MBAP frames -> reply -> retry, with the same
+//! 500 ms half-frame deadline and abort-style close/relisten as the smoltcp
+//! version.
 
-use embassy_net::tcp::TcpSocket;
-use embassy_net::Stack;
-use embassy_time::{Duration, Instant, Timer};
-use embedded_io_async::Write as _;
+use embassy_time::{Duration, Instant};
 
 use io_edge_hub_proto::mbtcp_adu::{mbtcp_adu_process, MBTCP_ADU_TX_MAX};
 
 use crate::appstate::{Hooks, MB_SERVER, REGS};
+use crate::w5500::{SR_CLOSE_WAIT, SR_ESTABLISHED, SR_INIT, SR_LISTEN, W5500};
 
 pub const MBTCP_PORT: u16 = 502;
 
-/// One serving socket: accept -> serve until closed -> accept again.
-/// Buffers come in as task args: two instances must not share in-body statics
-/// (StaticCell double-init panics). pool_size = 2: two concurrent masters.
-/// Occupied serving slots (0..2); gates the rejector listener.
-pub static BUSY: core::sync::atomic::AtomicU8 = core::sync::atomic::AtomicU8::new(0);
-
-#[embassy_executor::task(pool_size = 2)]
-pub async fn conn_task(
-    stack: Stack<'static>,
+pub struct MbSock {
+    sock: u8,
     name: &'static str,
-    rx_buf: &'static mut [u8; 512],
-    tx_buf: &'static mut [u8; 512],
-) {
-    let mut sock = TcpSocket::new(stack, rx_buf, tx_buf);
-    sock.set_timeout(Some(Duration::from_secs(120)));
-    loop {
-        crate::stackmark::probe(name);
-        // port-only endpoint = addr None (ANY); Some(0.0.0.0) would NOT match
-        if sock.accept(MBTCP_PORT).await.is_err() {
-            Timer::after_millis(100).await;
-            continue;
-        }
-        BUSY.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
-        serve(&mut sock, name).await;
-        BUSY.fetch_sub(1, core::sync::atomic::Ordering::Relaxed);
-        // hard reset: instant Closed -> instantly reusable for the next
-        // accept (graceful close lingers in FIN/TIME_WAIT states and leaves
-        // the port without a listener)
-        sock.abort();
-        Timer::after_millis(10).await;
-    }
+    rbuf: [u8; 300],  // raw read chunks
+    frame: [u8; 264], // MBAP + PDU
+    flen: usize,
+    deadline: Option<Instant>,
+    out: [u8; MBTCP_ADU_TX_MAX],
+    olen: usize, // >0: reply parked until TX frees up
 }
 
-/// Third listener: accepts the excess connection then immediately aborts it
-/// (the client's connect() succeeds and its request dies with a reset).
-/// Arms ONLY while both serving slots are busy and disarms within 50 ms of
-/// the load dropping — a lingering listener steals the next legit client
-/// (the FTP rejector had the same latch bug).
-#[embassy_executor::task]
-pub async fn reject_task(
-    stack: Stack<'static>,
-    rx_buf: &'static mut [u8; 64],
-    tx_buf: &'static mut [u8; 64],
-) {
-    use embassy_futures::select::{select, Either};
-    let mut sock = TcpSocket::new(stack, rx_buf, tx_buf);
-    sock.set_timeout(Some(Duration::from_secs(5)));
-    loop {
-        crate::stackmark::probe("mb-reject");
-        if BUSY.load(core::sync::atomic::Ordering::Relaxed) >= 2 {
-            match select(sock.accept(MBTCP_PORT), Timer::after_millis(50)).await {
-                Either::First(Ok(())) => {
-                    sock.abort();
-                }
-                _ => {
-                    sock.abort(); // busy window passed: disarm promptly
-                }
-            }
-        } else {
-            Timer::after_millis(5).await;
-        }
-    }
-}
-
-/// Serve one connection: accumulate frames per MBAP length, 500ms half-frame
-/// deadline, single send per reply.
 /// Total on-wire length of the ADU in `frame` (MBAP length clamped).
 fn mbap_frame_len(frame: &[u8]) -> usize {
     6 + u16::from_be_bytes([frame[4], frame[5]]).min(256) as usize
 }
 
-async fn serve(sock: &mut TcpSocket<'static>, name: &'static str) {
-    let mut rbuf = [0u8; 300]; // raw read chunks
-    let mut frame = [0u8; 264]; // MBAP + PDU
-    let mut flen = 0usize;
-    let mut deadline: Option<Instant> = None;
-    let mut out = [0u8; MBTCP_ADU_TX_MAX];
-
-    loop {
-        crate::stackmark::probe(name);
-        if let Some(d) = deadline {
-            if Instant::now() >= d {
-                return; // half-frame timeout
-            }
+impl MbSock {
+    pub fn new(sock: u8, name: &'static str) -> Self {
+        Self {
+            sock,
+            name,
+            rbuf: [0; 300],
+            frame: [0; 264],
+            flen: 0,
+            deadline: None,
+            out: [0; MBTCP_ADU_TX_MAX],
+            olen: 0,
         }
-        let n = match sock.read(&mut rbuf).await {
-            Ok(0) => return, // closed
-            Ok(n) => n,
-            Err(_) => return,
-        };
-        let mut ix = 0;
-        while ix < n {
-            // copy only what the current frame still needs: a chunk holding
-            // several pipelined ADUs must leave the tail for the next pass
-            let want = if flen < 8 { 8 } else { mbap_frame_len(&frame) };
-            let take = (n - ix).min(want - flen);
-            frame[flen..flen + take].copy_from_slice(&rbuf[ix..ix + take]);
-            flen += take;
-            ix += take;
+    }
 
-            if flen >= 8 && flen >= mbap_frame_len(&frame) {
-                let rlen = critical_section::with(|_cs| {
-                    REGS.lock(|r| {
-                        MB_SERVER.lock(|s| {
-                            let mut h = Hooks;
-                            mbtcp_adu_process(
-                                &frame[..mbap_frame_len(&frame)],
-                                &mut out,
-                                &mut s.borrow_mut(),
-                                &mut r.borrow_mut(),
-                                &mut h,
-                            )
-                        })
-                    })
-                });
-                if rlen > 0 && sock.write_all(&out[..rlen]).await.is_err() {
+    fn reset_session(&mut self) {
+        self.flen = 0;
+        self.deadline = None;
+        self.olen = 0;
+    }
+
+    /// One poll tick: service the socket, called every ~2 ms by net_task.
+    pub fn poll(&mut self, w: &mut W5500) {
+        crate::stackmark::probe(self.name);
+
+        // retry a parked reply first (TX freed when the chip ACKed)
+        if self.olen > 0 && w.tcp_try_send(self.sock, &self.out[..self.olen]) {
+            self.olen = 0;
+        }
+
+        // ESTABLISHED, or CLOSE_WAIT with a pipelined request still in the
+        // RX buffer (a master may FIN right after sending): drain first —
+        // our side can still transmit in CLOSE_WAIT — and close on the next
+        // idle tick.
+        let sr = w.tcp_state(self.sock);
+        let session =
+            sr == SR_ESTABLISHED || (sr == SR_CLOSE_WAIT && w.tcp_rx_pending(self.sock) > 0);
+        if !session {
+            match sr {
+                SR_INIT | SR_LISTEN => {
+                    self.reset_session(); // between sessions: stay clean
                     return;
                 }
-                flen = 0;
-                deadline = None;
+                // CLOSED / CLOSE_WAIT / transient states: abort + re-arm
+                // the listener so :502 never lingers unserved
+                _ => {
+                    w.tcp_close_reopen(self.sock, MBTCP_PORT);
+                    self.reset_session();
+                    return;
+                }
             }
         }
-        if flen > 0 && deadline.is_none() {
-            deadline = Some(Instant::now() + Duration::from_millis(500));
+
+        // half-frame deadline (500ms), same as the smoltcp version
+        if let Some(d) = self.deadline {
+            if Instant::now() >= d {
+                w.tcp_close_reopen(self.sock, MBTCP_PORT);
+                self.reset_session();
+                return;
+            }
+        }
+
+        loop {
+            let n = w.tcp_recv(self.sock, &mut self.rbuf);
+            if n == 0 {
+                break;
+            }
+            let mut ix = 0;
+            while ix < n {
+                // copy only what the current frame still needs: a chunk
+                // holding several pipelined ADUs must leave the tail for
+                // the next pass
+                let want = if self.flen < 8 {
+                    8
+                } else {
+                    mbap_frame_len(&self.frame)
+                };
+                let take = (n - ix).min(want - self.flen);
+                self.frame[self.flen..self.flen + take].copy_from_slice(&self.rbuf[ix..ix + take]);
+                self.flen += take;
+                ix += take;
+
+                if self.flen >= 8 && self.flen >= mbap_frame_len(&self.frame) {
+                    let rlen = critical_section::with(|_cs| {
+                        REGS.lock(|r| {
+                            MB_SERVER.lock(|s| {
+                                let mut h = Hooks;
+                                mbtcp_adu_process(
+                                    &self.frame[..mbap_frame_len(&self.frame)],
+                                    &mut self.out,
+                                    &mut s.borrow_mut(),
+                                    &mut r.borrow_mut(),
+                                    &mut h,
+                                )
+                            })
+                        })
+                    });
+                    if rlen > 0 {
+                        if !w.tcp_try_send(self.sock, &self.out[..rlen]) {
+                            // TX busy with un-ACKed replies: park it, retry
+                            // on a later poll (order is preserved)
+                            self.olen = rlen;
+                        }
+                    }
+                    self.flen = 0;
+                    self.deadline = None;
+                }
+            }
+        }
+        if self.flen > 0 && self.deadline.is_none() {
+            self.deadline = Some(Instant::now() + Duration::from_millis(500));
         }
     }
 }
